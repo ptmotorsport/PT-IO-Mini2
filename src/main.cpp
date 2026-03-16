@@ -115,6 +115,12 @@ volatile uint32_t diPeriodCounts[NUM_DIGITAL_IN];
 volatile uint32_t diHighCounts[NUM_DIGITAL_IN];
 volatile bool diHasPeriod[NUM_DIGITAL_IN];
 volatile bool diHasHigh[NUM_DIGITAL_IN];
+volatile uint32_t diCapSeq[NUM_DIGITAL_IN];  // incremented on each capture event
+
+// Stale capture detection (main loop)
+uint32_t diCapSeqLast[NUM_DIGITAL_IN];
+uint32_t diCapTsLast[NUM_DIGITAL_IN];
+const uint32_t DI_STALE_TIMEOUT_MS = 500;
 
 // Runtime status
 uint32_t lastCanRxMs = 0;
@@ -128,16 +134,36 @@ bool canInitOk = false;
 uint16_t canRxCount = 0;
 uint16_t canTxCount = 0;
 uint16_t canTxFail = 0;
+bool serialOverride = false;  // when true, CAN watchdog is bypassed for serial testing
 
-// Timers
+// Timers - input capture
 FspTimer gpt0; // DI4/DI5
 FspTimer gpt1; // DI2/DI3
 FspTimer gpt2; // DI1/DI6
 FspTimer gpt3; // DI7/DI8
 
-FspTimer gpt4; // DPO5/6 PWM
-FspTimer gpt5; // DPO1/2 PWM
-FspTimer gpt6; // DPO3/4 PWM
+// Software PWM tick timer
+// 10 kHz — keeps ISR CPU load under 20 % even at 24 MHz ICLK (UNO R4 Minima HOCO).
+// At 300 Hz output freq → period = 33 ticks ≈ 3 % duty resolution.
+#define SW_PWM_TICK_HZ 10000UL
+static volatile int8_t swPwmIrqNum = -1;  // IELSR slot allocated for AGT1
+
+struct SwPwmChannel {
+  volatile uint16_t period;    // ticks per cycle  (SW_PWM_TICK_HZ / freq)
+  volatile uint16_t highTicks; // ticks HIGH per cycle
+};
+SwPwmChannel swPwmCh[NUM_DIGITAL_OUT];
+uint16_t swPwmCounter[NUM_DIGITAL_OUT]; // ISR-only counter (not volatile — reduces ISR overhead)
+volatile uint32_t swPwmTickCount = 0;   // ISR tick counter for diagnostics
+
+// Precomputed PORT register pointers for fast ISR pin toggling
+// Uses POSR/PORR (atomic set/reset) — no PFS write-protection needed
+struct SwPwmPin {
+  volatile uint32_t *pcntr3; // PCNTR3 register (POSR=bits[15:0], PORR=bits[31:16])
+  uint32_t setVal;           // value to write to PCNTR3 to set pin HIGH
+  uint32_t clrVal;           // value to write to PCNTR3 to set pin LOW
+};
+SwPwmPin swPwmPins[NUM_DIGITAL_OUT];
 
 struct CaptureCtx {
   uint8_t idxA;
@@ -167,24 +193,30 @@ static bool readDigitalIn(uint8_t index) {
 static bool readDigitalOut(uint8_t index) {
   uint8_t port = DIGITAL_OUT_PINS[index] >> 8;
   uint8_t pin = DIGITAL_OUT_PINS[index] & 0xFF;
-  return R_PFS->PORT[port].PIN[pin].PmnPFS_b.PODR ? true : false;
+  // Read actual pin level via PCNTR2.PIDR (not PFS PODR which may be stale)
+  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + port * 0x20u);
+  return (portReg->PCNTR2 & (1u << pin)) ? true : false;
 }
 
 static void configureGpioInput(bsp_io_port_pin_t pin) {
   uint8_t port = pin >> 8;
   uint8_t bit = pin & 0xFF;
+  R_BSP_PinAccessEnable();
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PMR = 0;
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PSEL = 0;
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PDR = 0;
+  R_BSP_PinAccessDisable();
 }
 
 static void configureGpioOutput(bsp_io_port_pin_t pin, bool level) {
   uint8_t port = pin >> 8;
   uint8_t bit = pin & 0xFF;
+  R_BSP_PinAccessEnable();
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PMR = 0;
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PSEL = 0;
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PDR = 1;
   R_PFS->PORT[port].PIN[bit].PmnPFS_b.PODR = level ? 1 : 0;
+  R_BSP_PinAccessDisable();
 }
 
 static void configureGptPeripheral(bsp_io_port_pin_t pin) {
@@ -327,6 +359,12 @@ static void loadConfig() {
     setDefaults(config);
     saveConfig();
   }
+  // Validate frequency values — corrupted EEPROM can yield garbage
+  for (int p = 0; p < 4; p++) {
+    if (config.outFreqHz[p] < 50 || config.outFreqHz[p] > 10000) {
+      config.outFreqHz[p] = DEFAULT_PWM_FREQ_HZ;
+    }
+  }
 }
 
 static uint32_t modeColor(uint8_t mode) {
@@ -370,6 +408,8 @@ static void captureCallback(timer_callback_args_t *p_args) {
   bool level = readDigitalIn(idx);
   uint32_t captured = p_args->capture;
 
+  diCapSeq[idx]++;
+
   if (level) {
     if (diLastRise[idx] != 0) {
       diPeriodCounts[idx] = diffCounts(captured, diLastRise[idx], ctx->maxCounts);
@@ -385,6 +425,16 @@ static void captureCallback(timer_callback_args_t *p_args) {
 }
 
 static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChannel, uint8_t idxA, uint8_t idxB) {
+  // Pre-initialize context so callback has valid data as soon as timer starts
+  ctx.idxA = idxA;
+  ctx.idxB = idxB;
+  ctx.maxCounts = 0xFFFFFFFF;
+  ctx.timerFreqHz = 0;
+
+  // Arduino variant marks GPT0-3 as TIMER_PWM for default PWM pins.
+  // force_use_of_pwm_reserved_timer() allows begin() to claim these channels
+  // for input capture instead. The flag resets after each begin() call.
+  FspTimer::force_use_of_pwm_reserved_timer();
   timer.begin(TIMER_MODE_PERIODIC, GPT_TIMER, gptChannel, 0xFFFFFFFF, 1, TIMER_SOURCE_DIV_1, captureCallback, &ctx);
   timer.set_source_capture_a((gpt_source_t)(
     GPT_SOURCE_GTIOCA_RISING_WHILE_GTIOCB_LOW |
@@ -401,13 +451,12 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
     ext->capture_filter_gtioca = GPT_CAPTURE_FILTER_PCLKD_DIV_64;
     ext->capture_filter_gtiocb = GPT_CAPTURE_FILTER_PCLKD_DIV_64;
   }
-  timer.setup_capture_a_irq(12, nullptr);
-  timer.setup_capture_b_irq(12, nullptr);
+  bool irqA = timer.setup_capture_a_irq(12, nullptr);
+  bool irqB = timer.setup_capture_b_irq(12, nullptr);
   timer.open();
   timer.start();
 
-  ctx.idxA = idxA;
-  ctx.idxB = idxB;
+  // Update context with actual timer parameters now that it's running
   ctx.maxCounts = timer.get_period_raw();
   ctx.timerFreqHz = timer.get_freq_hz();
 
@@ -429,53 +478,75 @@ static bool setCanBitrate(uint16_t kbps) {
   return canInitOk;
 }
 
-static void setOutputGpio(uint8_t index, bool on) {
-  bool activeHigh = (config.activeMask >> index) & 0x01;
-  bool level = activeHigh ? on : !on;
-  configureGpioOutput(DIGITAL_OUT_PINS[index], level);
-}
+// Software PWM tick ISR — bare-metal AGT1 underflow handler
+// Clears ICU IR + AGT1 underflow flag, then updates all 8 outputs via batched PCNTR3 writes.
+static void swPwmIsr() {
+  // 1. Clear ICU Interrupt Request bit — without this the IRQ re-fires endlessly
+  //    (same as R_BSP_IrqStatusClear in the FSP)
+  IRQn_Type irq = R_FSP_CurrentIrqGet();
+  R_ICU->IELSR_b[irq].IR = 0U;
 
-static void setPwmDutyPair(FspTimer &timer, uint16_t freqHz, float dutyA, float dutyB) {
-  if (freqHz == 0) {
-    freqHz = DEFAULT_PWM_FREQ_HZ;
+  // 2. Clear AGT1 underflow flag (write 0 to TUNDF, preserve TSTART)
+  R_AGT1->AGTCR = R_AGT1->AGTCR & ~(R_AGT0_AGTCR_TUNDF_Msk |
+                                       R_AGT0_AGTCR_TCMAF_Msk |
+                                       R_AGT0_AGTCR_TCMBF_Msk |
+                                       R_AGT0_AGTCR_TEDGF_Msk);
+  __DSB();  // Ensure writes complete before ISR returns
+
+  swPwmTickCount++;
+
+  // Accumulate POSR/PORR bits per port, then write once per port
+  uint32_t p4 = 0, p3 = 0, p1 = 0;
+
+  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+    uint16_t cnt = swPwmCounter[i] + 1;
+    if (cnt >= swPwmCh[i].period) cnt = 0;
+    swPwmCounter[i] = cnt;
+    if (cnt < swPwmCh[i].highTicks) {
+      if (i < 4) p4 |= swPwmPins[i].setVal;
+      else if (i < 7) p3 |= swPwmPins[i].setVal;
+      else p1 |= swPwmPins[i].setVal;
+    } else {
+      if (i < 4) p4 |= swPwmPins[i].clrVal;
+      else if (i < 7) p3 |= swPwmPins[i].clrVal;
+      else p1 |= swPwmPins[i].clrVal;
+    }
   }
-  double periodUs = 1000000.0 / static_cast<double>(freqHz);
-  timer.set_period_us(periodUs);
-  timer.set_pulse_us(periodUs * dutyA / 100.0, CHANNEL_A);
-  timer.set_pulse_us(periodUs * dutyB / 100.0, CHANNEL_B);
+
+  *swPwmPins[0].pcntr3 = p4;  // PORT4
+  *swPwmPins[4].pcntr3 = p3;  // PORT3
+  *swPwmPins[7].pcntr3 = p1;  // PORT1
 }
 
+// Update software PWM parameters for all 8 output channels
 static void applyOutputs(bool useSafeState) {
-  float dutyPercent[NUM_DIGITAL_OUT];
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t duty = outputDuty[i];
     if (useSafeState) {
       bool safeOn = (config.safeMask >> i) & 0x01;
       duty = safeOn ? 255 : 0;
     }
-    dutyPercent[i] = (static_cast<float>(duty) * 100.0f) / 255.0f;
+    // Map 0-255 duty to a 0.0-1.0 fraction, apply polarity
+    float dutyFrac = static_cast<float>(duty) / 255.0f;
+    bool activeHigh = (config.activeMask >> i) & 0x01;
+    if (!activeHigh) dutyFrac = 1.0f - dutyFrac;
+
+    uint16_t freq = outputFreq[i];
+    if (freq == 0) freq = DEFAULT_PWM_FREQ_HZ;
+    uint16_t period = static_cast<uint16_t>(SW_PWM_TICK_HZ / freq);
+    if (period < 2) period = 2;  // minimum 2 ticks for any toggling
+    uint16_t high = static_cast<uint16_t>(period * dutyFrac + 0.5f);
+    if (duty == 255 && activeHigh)  high = period; // guarantee 100 %
+    if (duty == 0   && activeHigh)  high = 0;      // guarantee   0 %
+    if (duty == 255 && !activeHigh) high = 0;
+    if (duty == 0   && !activeHigh) high = period;
+
+    noInterrupts();
+    swPwmCh[i].period    = period;
+    swPwmCh[i].highTicks = high;
+    if (swPwmCounter[i] >= period) swPwmCounter[i] = 0;
+    interrupts();
   }
-
-  // DPO1/2 -> GPT5
-  float duty1 = ((config.activeMask & 0x01) ? dutyPercent[0] : (100.0f - dutyPercent[0]));
-  float duty2 = ((config.activeMask & 0x02) ? dutyPercent[1] : (100.0f - dutyPercent[1]));
-  setPwmDutyPair(gpt5, outputFreq[0], duty2, duty1); // GPT5: A=P409 (DPO2), B=P408 (DPO1)
-
-  // DPO3/4 -> GPT6
-  float duty3 = ((config.activeMask & 0x04) ? dutyPercent[2] : (100.0f - dutyPercent[2]));
-  float duty4 = ((config.activeMask & 0x08) ? dutyPercent[3] : (100.0f - dutyPercent[3]));
-  setPwmDutyPair(gpt6, outputFreq[2], duty4, duty3); // GPT6: A=P411 (DPO4), B=P410 (DPO3)
-
-  // DPO5/6 -> GPT4
-  float duty5 = ((config.activeMask & 0x10) ? dutyPercent[4] : (100.0f - dutyPercent[4]));
-  float duty6 = ((config.activeMask & 0x20) ? dutyPercent[5] : (100.0f - dutyPercent[5]));
-  setPwmDutyPair(gpt4, outputFreq[4], duty5, duty6); // GPT4: A=P302 (DPO5), B=P301 (DPO6)
-
-  // DPO7/8 GPIO only
-  bool on7 = dutyPercent[6] > 0.1f;
-  bool on8 = dutyPercent[7] > 0.1f;
-  setOutputGpio(6, on7);
-  setOutputGpio(7, on8);
 }
 
 static void handleCanRx(const CanMsg &msg) {
@@ -500,9 +571,9 @@ static void handleCanRx(const CanMsg &msg) {
   uint8_t dutyB = msg.data[6];
   uint8_t flagsB = msg.data[7];
 
-  uint16_t pairFreq = freqA ? freqA : freqB;
-  outputFreq[outA] = pairFreq;
-  outputFreq[outB] = pairFreq;
+  // Each channel can now have its own frequency
+  outputFreq[outA] = freqA ? freqA : DEFAULT_PWM_FREQ_HZ;
+  outputFreq[outB] = freqB ? freqB : DEFAULT_PWM_FREQ_HZ;
   outputDuty[outA] = dutyA;
   outputDuty[outB] = dutyB;
 
@@ -680,21 +751,127 @@ static void sendTxFrames() {
   sendCanFrame(config.txBaseId + 7, txStatus, 8);
 }
 
+static void printDiag() {
+  Serial.println("\n========== DIAG ==========");
+
+  // GPT capture timer diagnostics
+  struct { FspTimer *timer; CaptureCtx *ctx; uint8_t ch; const char *label; } timers[] = {
+    {&gpt0, &gpt0Ctx, 0, "GPT0 (DI5-A, DI4-B)"},
+    {&gpt1, &gpt1Ctx, 1, "GPT1 (DI3-A, DI2-B)"},
+    {&gpt2, &gpt2Ctx, 2, "GPT2 (DI6-A, DI1-B)"},
+    {&gpt3, &gpt3Ctx, 3, "GPT3 (DI8-A, DI7-B)"},
+  };
+  for (auto &t : timers) {
+    gpt_extended_cfg_t *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t.timer->get_cfg()->p_extend));
+    uint32_t baseAddr = (uint32_t)R_GPT0 + (t.ch * ((uint32_t)R_GPT1 - (uint32_t)R_GPT0));
+    R_GPT0_Type *reg = (R_GPT0_Type *)baseAddr;
+
+    Serial.print(t.label);
+    Serial.print(": capA_irq="); Serial.print((int)ext->capture_a_irq);
+    Serial.print(" capB_irq="); Serial.print((int)ext->capture_b_irq);
+    Serial.print(" GTICASR=0x"); Serial.print(reg->GTICASR, HEX);
+    Serial.print(" GTICBSR=0x"); Serial.print(reg->GTICBSR, HEX);
+    Serial.print(" GTIOR=0x"); Serial.print(reg->GTIOR, HEX);
+    Serial.print(" freq="); Serial.print(t.ctx->timerFreqHz);
+    Serial.println();
+
+    // IELSR, NVIC, and GTST details
+    int irqA = (int)ext->capture_a_irq;
+    int irqB = (int)ext->capture_b_irq;
+    Serial.print("  IELSR["); Serial.print(irqA); Serial.print("]=0x");
+    Serial.print(irqA >= 0 ? R_ICU->IELSR[irqA] : 0, HEX);
+    Serial.print(" IELSR["); Serial.print(irqB); Serial.print("]=0x");
+    Serial.print(irqB >= 0 ? R_ICU->IELSR[irqB] : 0, HEX);
+    // NVIC enabled?
+    Serial.print(" NVIC_EN=");
+    Serial.print((irqA >= 0 && NVIC_GetEnableIRQ((IRQn_Type)irqA)) ? "A" : "-");
+    Serial.print((irqB >= 0 && NVIC_GetEnableIRQ((IRQn_Type)irqB)) ? "B" : "-");
+    // NVIC pending?
+    Serial.print(" NVIC_PEND=");
+    Serial.print((irqA >= 0 && NVIC_GetPendingIRQ((IRQn_Type)irqA)) ? "A" : "-");
+    Serial.print((irqB >= 0 && NVIC_GetPendingIRQ((IRQn_Type)irqB)) ? "B" : "-");
+    // GTST (status register): bit 0=TCFA(cap A flag), bit 1=TCFB(cap B flag)
+    Serial.print(" GTST=0x"); Serial.print(reg->GTST, HEX);
+    // GTCNT
+    Serial.print(" GTCNT="); Serial.print(reg->GTCNT);
+    // GTCCRA and GTCCRB (last captured values)
+    Serial.print(" CCRA="); Serial.print(reg->GTCCR[0]);
+    Serial.print(" CCRB="); Serial.print(reg->GTCCR[1]);
+    Serial.println();
+  }
+
+  // SW PWM diagnostics — include AGT1 register dump
+  Serial.print("--- SW PWM: tickCount=");
+  Serial.print(swPwmTickCount);
+  Serial.print("  IRQslot="); Serial.print(swPwmIrqNum);
+  Serial.println(" ---");
+  Serial.print("AGT1: AGT=0x"); Serial.print(R_AGT1->AGT, HEX);
+  Serial.print(" AGTCR=0x"); Serial.print(R_AGT1->AGTCR, HEX);
+  Serial.print(" AGTMR1=0x"); Serial.print(R_AGT1->AGTMR1, HEX);
+  Serial.print(" AGTMR2=0x"); Serial.print(R_AGT1->AGTMR2, HEX);
+  if (swPwmIrqNum >= 0) {
+    Serial.print(" IELSR=0x"); Serial.print(R_ICU->IELSR[swPwmIrqNum], HEX);
+    Serial.print(" NVIC="); Serial.print(NVIC_GetEnableIRQ((IRQn_Type)swPwmIrqNum) ? "EN" : "DIS");
+  }
+  Serial.println();
+  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+    uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
+    uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
+    uint32_t pfs = R_PFS->PORT[port].PIN[pin].PmnPFS;
+    Serial.print("DPO"); Serial.print(i + 1);
+    Serial.print(" ("); Serial.print(DIGITAL_OUT_PORT_NAMES[i]);
+    Serial.print("): PFS=0x"); Serial.print(pfs, HEX);
+    Serial.print(" PDR="); Serial.print((pfs >> 2) & 1);
+    Serial.print(" PMR="); Serial.print((pfs >> 16) & 1);
+    Serial.print(" period="); Serial.print(swPwmCh[i].period);
+    Serial.print(" high="); Serial.print(swPwmCh[i].highTicks);
+    Serial.println();
+  }
+
+  // Pin PFS registers
+  Serial.println("--- DI Pin PFS ---");
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    uint8_t port = DIGITAL_IN_PINS[i] >> 8;
+    uint8_t pin = DIGITAL_IN_PINS[i] & 0xFF;
+    uint32_t pfs = R_PFS->PORT[port].PIN[pin].PmnPFS;
+    Serial.print("DI"); Serial.print(i + 1);
+    Serial.print(" ("); Serial.print(DIGITAL_IN_PORT_NAMES[i]);
+    Serial.print("): PFS=0x"); Serial.print(pfs, HEX);
+    Serial.print(" PMR="); Serial.print((pfs >> 16) & 1);
+    Serial.print(" PSEL=0x"); Serial.print((pfs >> 24) & 0x1F, HEX);
+    Serial.print(" [cap="); Serial.print(diCapSeq[i]); Serial.print("]");
+    Serial.println();
+  }
+
+  // Full IELSR dump for all allocated slots
+  Serial.println("--- IELSR (first 20) ---");
+  for (int i = 0; i < 20; i++) {
+    Serial.print("IELSR["); Serial.print(i); Serial.print("]=0x");
+    Serial.print(R_ICU->IELSR[i], HEX);
+    if ((i % 4) == 3) Serial.println(); else Serial.print("  ");
+  }
+  Serial.println();
+  Serial.println("============================");
+}
+
 static void printHelp() {
   Serial.println("\nCommands:");
   Serial.println("  HELP                  - Show this help");
   Serial.println("  STATUS                - Print one-time status report");
   Serial.println("  MONITOR ON|OFF|<ms>    - Enable/disable status monitor or set interval");
+  Serial.println("  DIAG                  - Print capture timer diagnostics");
   Serial.println("  CANSPEED <kbps>        - Set CAN speed (125/250/500/1000)");
   Serial.println("  TXBASE <hex>           - Set CAN TX base ID");
   Serial.println("  RXBASE <hex>           - Set CAN RX base ID");
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode (NeoPixel color)");
-  Serial.println("  OUTFREQ <pair> <hz>     - Set output pair PWM frequency (1-4)");
+  Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
+  Serial.println("  OUTFREQ <ch> <hz>       - Set output channel PWM frequency (1-8)");
   Serial.println("  CONFIG                 - Print stored configuration");
   Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-8)");
   Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-8)");
+  Serial.println("  DEFAULTS                - Reset all config to factory defaults");
   Serial.println();
 }
 
@@ -777,13 +954,29 @@ static void printStatusOnce() {
     } else {
       Serial.print("-- Hz, duty=--");
     }
+    Serial.print(" [cap=");
+    Serial.print(diCapSeq[i]);
+    Serial.print("]");
     Serial.println();
   }
 
   Serial.println();
   Serial.println("--- Digital Outputs ---");
+  Serial.print("SafeState=");
+  Serial.print(outputsInSafeState ? "YES" : "NO");
+  Serial.print("  lastCanRxMs=");
+  Serial.print(lastCanRxMs);
+  Serial.print("  now=");
+  Serial.print(millis());
+  Serial.print("  timeout=");
+  Serial.print(config.rxTimeoutMs);
+  Serial.print("  swPwmTicks=");
+  Serial.println(swPwmTickCount);
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     bool state = readDigitalOut(i);
+    uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
+    uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
+    uint32_t pfs = R_PFS->PORT[port].PIN[pin].PmnPFS;
     Serial.print("DPO");
     Serial.print(i + 1);
     Serial.print(" (");
@@ -794,7 +987,13 @@ static void printStatusOnce() {
     Serial.print(outputDuty[i]);
     Serial.print("/255, freq=");
     Serial.print(outputFreq[i]);
-    Serial.println(" Hz");
+    Serial.print(" Hz, PDR=");
+    Serial.print((pfs >> 2) & 1);
+    Serial.print(" hi=");
+    Serial.print(swPwmCh[i].highTicks);
+    Serial.print("/");
+    Serial.print(swPwmCh[i].period);
+    Serial.println();
   }
 
   Serial.println("\n============================");
@@ -873,8 +1072,24 @@ static void handleSerial() {
     printStatusOnce();
     return;
   }
+  if (cmd == "DEFAULTS") {
+    setDefaults(config);
+    saveConfig();
+    // Reload output frequencies from fresh defaults
+    for (int p = 0; p < 4; p++) {
+      outputFreq[p * 2]     = config.outFreqHz[p];
+      outputFreq[p * 2 + 1] = config.outFreqHz[p];
+    }
+    applyOutputs(outputsInSafeState);
+    Serial.println("OK: Config reset to defaults");
+    return;
+  }
   if (cmd == "CONFIG") {
     printConfig();
+    return;
+  }
+  if (cmd == "DIAG") {
+    printDiag();
     return;
   }
   if (cmd.startsWith("MONITOR")) {
@@ -983,17 +1198,17 @@ static void handleSerial() {
   }
 
   if (cmd.startsWith("OUTFREQ")) {
-    uint8_t pair = static_cast<uint8_t>(getArg(1).toInt());
+    uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     uint16_t hz = static_cast<uint16_t>(getArg(2).toInt());
-    if (pair < 1 || pair > 4 || hz == 0) {
-      Serial.println("ERR: OUTFREQ <pair 1-4> <hz>");
+    if (ch < 1 || ch > 8 || hz == 0) {
+      Serial.println("ERR: OUTFREQ <ch 1-8> <hz>");
       return;
     }
-    config.outFreqHz[pair - 1] = hz;
+    // Persist as pair frequency (pairs share EEPROM slot)
+    uint8_t pair = (ch - 1) / 2;
+    config.outFreqHz[pair] = hz;
     saveConfig();
-    uint8_t baseIdx = (pair - 1) * 2;
-    outputFreq[baseIdx] = hz;
-    outputFreq[baseIdx + 1] = hz;
+    outputFreq[ch - 1] = hz;
     applyOutputs(outputsInSafeState);
     Serial.println("OK");
     return;
@@ -1015,6 +1230,23 @@ static void handleSerial() {
     saveConfig();
     applyOutputs(outputsInSafeState);
     Serial.println("OK");
+    return;
+  }
+
+  if (cmd.startsWith("OUT ") && !cmd.startsWith("OUTFREQ")) {
+    uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
+    int pct = getArg(2).toInt();
+    if (ch < 1 || ch > 8 || pct < 0 || pct > 100) {
+      Serial.println("ERR: OUT <1-8> <0-100>");
+      return;
+    }
+    outputDuty[ch - 1] = static_cast<uint8_t>((pct * 255 + 50) / 100);
+    serialOverride = true;  // disable CAN watchdog while using serial
+    outputsInSafeState = false;
+    lastCanRxMs = millis();
+    applyOutputs(false);
+    Serial.print("OK: DPO"); Serial.print(ch);
+    Serial.print(" = "); Serial.print(pct); Serial.println("%");
     return;
   }
 
@@ -1044,35 +1276,89 @@ static void handleSerial() {
   Serial.println("ERR: Unknown command. Type HELP");
 }
 
-static void initPwmOutputs() {
-  // Configure pins for PWM peripheral
-  configureGptPeripheral(DIGITAL_OUT_PINS[0]); // DPO1
-  configureGptPeripheral(DIGITAL_OUT_PINS[1]); // DPO2
-  configureGptPeripheral(DIGITAL_OUT_PINS[2]); // DPO3
-  configureGptPeripheral(DIGITAL_OUT_PINS[3]); // DPO4
-  configureGptPeripheral(DIGITAL_OUT_PINS[4]); // DPO5
-  configureGptPeripheral(DIGITAL_OUT_PINS[5]); // DPO6
+static void initSwPwm() {
+  // Configure ALL 8 output pins as plain GPIO outputs (LOW initially)
+  // and precompute PORT register pointers for fast ISR toggling
+  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+    configureGpioOutput(DIGITAL_OUT_PINS[i], false);
+    swPwmCh[i].period    = static_cast<uint16_t>(SW_PWM_TICK_HZ / DEFAULT_PWM_FREQ_HZ);
+    swPwmCh[i].highTicks = 0;
+    swPwmCounter[i]      = 0;
 
-  gpt5.begin(TIMER_MODE_PWM, GPT_TIMER, 5, config.outFreqHz[0], 50.0f);
-  gpt5.add_pwm_extended_cfg();
-  gpt5.enable_pwm_channel(CHANNEL_A);
-  gpt5.enable_pwm_channel(CHANNEL_B);
-  gpt5.open();
-  gpt5.start();
+    // PORT registers are spaced 0x20 bytes apart from R_PORT0
+    uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
+    uint8_t pin  = DIGITAL_OUT_PINS[i] & 0xFF;
+    R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + port * 0x20u);
+    swPwmPins[i].pcntr3 = &portReg->PCNTR3;
+    uint32_t pinBit = (1u << pin);
+    swPwmPins[i].setVal = pinBit;              // POSR = bits[15:0]
+    swPwmPins[i].clrVal = pinBit << 16;        // PORR = bits[31:16]
+  }
 
-  gpt6.begin(TIMER_MODE_PWM, GPT_TIMER, 6, config.outFreqHz[1], 50.0f);
-  gpt6.add_pwm_extended_cfg();
-  gpt6.enable_pwm_channel(CHANNEL_A);
-  gpt6.enable_pwm_channel(CHANNEL_B);
-  gpt6.open();
-  gpt6.start();
+  // ---- Bare-metal AGT1 configuration (bypasses FspTimer entirely) ----
+  // Step 1: Enable AGT1 module (clear MSTPCRD.MSTPD2)
+  R_MSTP->MSTPCRD &= ~(1u << 2);
 
-  gpt4.begin(TIMER_MODE_PWM, GPT_TIMER, 4, config.outFreqHz[2], 50.0f);
-  gpt4.add_pwm_extended_cfg();
-  gpt4.enable_pwm_channel(CHANNEL_A);
-  gpt4.enable_pwm_channel(CHANNEL_B);
-  gpt4.open();
-  gpt4.start();
+  // Step 2: Stop AGT1 if running
+  R_AGT1->AGTCR = 0x04;  // TSTOP=1 → force stop, counter -> 0xFFFF
+  while (R_AGT1->AGTCR_b.TCSTF) {}  // Wait for stop to take effect
+
+  // Step 3: Configure count source and mode
+  //   AGTMR1: TCK[6:4]=000 (PCLKB), TMOD[2:0]=000 (timer mode)
+  R_AGT1->AGTMR1 = 0x00;
+  //   AGTMR2: CKS[2:0]=000 (no sub-division), LPM=0
+  R_AGT1->AGTMR2 = 0x00;
+
+  // Step 4: Set reload period
+  //   AGT is a 16-bit down-counter. It counts from AGT → 0, underflows, reloads.
+  //   Period = PCLKB / SW_PWM_TICK_HZ
+  const uint32_t pclkb = R_FSP_SystemClockHzGet(FSP_PRIV_CLOCK_PCLKB);
+  uint16_t reload = static_cast<uint16_t>(pclkb / SW_PWM_TICK_HZ - 1);
+  R_AGT1->AGT = reload;
+  Serial.print("[SWPWM] PCLKB="); Serial.print(pclkb);
+  Serial.print(" reload="); Serial.println(reload);
+
+  // Step 5: Disable output pins / compare match (we only want underflow IRQ)
+  R_AGT1->AGTIOC  = 0x00;
+  R_AGT1->AGTCMSR = 0x00;
+  R_AGT1->AGTCMA  = 0xFFFF;
+  R_AGT1->AGTCMB  = 0xFFFF;
+
+  // Step 6: Allocate IELSR slot for AGT1_INT and install our ISR
+  //   Use the IRQManager’s last_interrupt_index to get a free slot.
+  //   We can’t call IRQManager directly (private), but we CAN write IELSR
+  //   and the vector table manually, same way IRQManager does.
+  volatile uint32_t *irqVec = (volatile uint32_t *)SCB->VTOR;
+  // Find a free IELSR slot (scan from 31 DOWN  IRQManager fills from 0 up)
+  int slot = -1;
+  for (int i = 31; i >= 0; i--) {
+    if (R_ICU->IELSR[i] == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot >= 0) {
+    // Link AGT1_INT event (33 = 0x21) to this IELSR slot
+    R_ICU->IELSR[slot] = 0x021;  // ELC_EVENT_AGT1_INT
+    // Install our bare ISR into the vector table
+    // VTOR points to the full vector table; programmable IRQs start at index 16 (after CM4 exceptions)
+    irqVec[16 + slot] = (uint32_t)swPwmIsr;
+    // Configure NVIC: set priority and enable
+    NVIC_SetPriority((IRQn_Type)slot, 14);
+    NVIC_ClearPendingIRQ((IRQn_Type)slot);
+    NVIC_EnableIRQ((IRQn_Type)slot);
+    swPwmIrqNum = (int8_t)slot;
+    Serial.print("[SWPWM] IRQ slot="); Serial.print(slot);
+    Serial.print(" IELSR=0x"); Serial.print(R_ICU->IELSR[slot], HEX);
+    Serial.println(" NVIC=EN");
+  } else {
+    Serial.println("[SWPWM] ERR: no free IELSR slot!");
+  }
+
+  // Step 7: Clear all flags and start the counter
+  R_AGT1->AGTCR = 0x01;  // TSTART=1, all flags cleared
+  Serial.print("[SWPWM] AGTCR=0x"); Serial.print(R_AGT1->AGTCR, HEX);
+  Serial.print(" TCSTF="); Serial.println(R_AGT1->AGTCR_b.TCSTF);
 }
 
 static void initCaptureInputs() {
@@ -1090,6 +1376,20 @@ static void initCaptureInputs() {
   initCaptureTimer(gpt1, gpt1Ctx, 1, 2, 1); // GPT1: A=DI3, B=DI2
   initCaptureTimer(gpt2, gpt2Ctx, 2, 5, 0); // GPT2: A=DI6, B=DI1
   initCaptureTimer(gpt3, gpt3Ctx, 3, 7, 6); // GPT3: A=DI8, B=DI7
+
+  // Force-enable NVIC for all capture IRQs.
+  // IRQManager::addTimerCompareCaptureA/B allocates the IELSR slot and ISR
+  // vector but does NOT call NVIC_EnableIRQ.  R_GPT_Open is supposed to
+  // enable them via r_gpt_enable_irq, but GPT0 capture-A (the very first
+  // slot) ends up with NVIC disabled in practice.  Explicitly enabling
+  // all capture IRQs here is a safe no-op for already-enabled ones and
+  // fixes the GPT0-A case.
+  FspTimer *capTimers[] = {&gpt0, &gpt1, &gpt2, &gpt3};
+  for (auto *t : capTimers) {
+    auto *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t->get_cfg()->p_extend));
+    if (ext->capture_a_irq >= 0) NVIC_EnableIRQ((IRQn_Type)ext->capture_a_irq);
+    if (ext->capture_b_irq >= 0) NVIC_EnableIRQ((IRQn_Type)ext->capture_b_irq);
+  }
 }
 
 void setup() {
@@ -1108,27 +1408,23 @@ void setup() {
     diHasPeriod[i] = false;
     diHasHigh[i] = false;
     diTimerFreq[i] = 0;
+    diCapSeq[i] = 0;
+    diCapSeqLast[i] = 0;
+    diCapTsLast[i] = 0;
   }
-
-  // Setup GPIO-only outputs for DPO7/8
-  configureGpioOutput(DIGITAL_OUT_PINS[6], false);
-  configureGpioOutput(DIGITAL_OUT_PINS[7], false);
 
   // Initialize output state arrays
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     outputDuty[i] = 0;
     outputFreq[i] = DEFAULT_PWM_FREQ_HZ;
   }
-  outputFreq[0] = config.outFreqHz[0];
-  outputFreq[1] = config.outFreqHz[0];
-  outputFreq[2] = config.outFreqHz[1];
-  outputFreq[3] = config.outFreqHz[1];
-  outputFreq[4] = config.outFreqHz[2];
-  outputFreq[5] = config.outFreqHz[2];
-  outputFreq[6] = config.outFreqHz[3];
-  outputFreq[7] = config.outFreqHz[3];
+  // Load per-pair frequencies from stored config
+  for (int p = 0; p < 4; p++) {
+    outputFreq[p * 2]     = config.outFreqHz[p];
+    outputFreq[p * 2 + 1] = config.outFreqHz[p];
+  }
 
-  initPwmOutputs();
+  initSwPwm();
   initCaptureInputs();
 
   // Initialize NeoPixel
@@ -1158,9 +1454,26 @@ void loop() {
   handleSerial();
   processCan();
 
-  if (!outputsInSafeState && (now - lastCanRxMs > config.rxTimeoutMs)) {
+  if (!outputsInSafeState && !serialOverride && (now - lastCanRxMs > config.rxTimeoutMs)) {
     applyOutputs(true);
     outputsInSafeState = true;
+  }
+
+  // Clear stale capture data when signal is removed
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    uint32_t seq = diCapSeq[i];
+    if (seq != diCapSeqLast[i]) {
+      diCapSeqLast[i] = seq;
+      diCapTsLast[i] = now;
+    } else if (diHasPeriod[i] && (now - diCapTsLast[i] > DI_STALE_TIMEOUT_MS)) {
+      noInterrupts();
+      diHasPeriod[i] = false;
+      diHasHigh[i] = false;
+      diPeriodCounts[i] = 0;
+      diHighCounts[i] = 0;
+      diLastRise[i] = 0;
+      interrupts();
+    }
   }
 
   if (monitorEnabled && (now - lastMonitorMs >= monitorIntervalMs)) {
