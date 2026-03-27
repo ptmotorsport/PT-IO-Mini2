@@ -6,6 +6,7 @@
 #include "r_ioport.h"
 #include "r_adc.h"
 #include "FspTimer.h"
+#include "can_modes.h"
 
 // NeoPixel Configuration
 #define NEOPIXEL_PIN 11  // P109 = Arduino D11
@@ -550,49 +551,20 @@ static void applyOutputs(bool useSafeState) {
 }
 
 static void handleCanRx(const CanMsg &msg) {
-  uint32_t id = msg.id;
-  if (id < config.rxBaseId || id > (config.rxBaseId + 3)) {
+  bool changed = false;
+  bool handled = canModeHandleRx(config.canMode,
+                                 msg,
+                                 config.rxBaseId,
+                                 DEFAULT_PWM_FREQ_HZ,
+                                 outputFreq,
+                                 outputDuty,
+                                 config.safeMask,
+                                 config.activeMask,
+                                 changed);
+
+  if (!handled) {
     return;
   }
-
-  uint8_t idxPair = static_cast<uint8_t>(id - config.rxBaseId); // 0..3
-  uint8_t outA = idxPair * 2;
-  uint8_t outB = outA + 1;
-
-  if (msg.data_length < 8) {
-    return;
-  }
-
-  uint16_t freqA = static_cast<uint16_t>(msg.data[0] | (msg.data[1] << 8));
-  uint8_t dutyA = msg.data[2];
-  uint8_t flagsA = msg.data[3];
-
-  uint16_t freqB = static_cast<uint16_t>(msg.data[4] | (msg.data[5] << 8));
-  uint8_t dutyB = msg.data[6];
-  uint8_t flagsB = msg.data[7];
-
-  // Each channel can now have its own frequency
-  outputFreq[outA] = freqA ? freqA : DEFAULT_PWM_FREQ_HZ;
-  outputFreq[outB] = freqB ? freqB : DEFAULT_PWM_FREQ_HZ;
-  outputDuty[outA] = dutyA;
-  outputDuty[outB] = dutyB;
-
-  bool safeA = flagsA & 0x01;
-  bool activeA = flagsA & 0x02;
-  bool safeB = flagsB & 0x01;
-  bool activeB = flagsB & 0x02;
-
-  uint8_t newSafeMask = config.safeMask;
-  uint8_t newActiveMask = config.activeMask;
-
-  newSafeMask = (newSafeMask & ~(1 << outA)) | (safeA ? (1 << outA) : 0);
-  newSafeMask = (newSafeMask & ~(1 << outB)) | (safeB ? (1 << outB) : 0);
-  newActiveMask = (newActiveMask & ~(1 << outA)) | (activeA ? (1 << outA) : 0);
-  newActiveMask = (newActiveMask & ~(1 << outB)) | (activeB ? (1 << outB) : 0);
-
-  bool changed = (newSafeMask != config.safeMask) || (newActiveMask != config.activeMask);
-  config.safeMask = newSafeMask;
-  config.activeMask = newActiveMask;
 
   if (changed) {
     saveConfig();
@@ -614,14 +586,35 @@ static void processCan() {
 }
 
 static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+  // Zero-init the whole struct — CanMsg has fields beyond id/data_length/data
+  // (e.g. rtr, extended flags) that the RA4M1 CAN controller reads.
+  // Without this, those fields are garbage on calls 2-N and the controller
+  // rejects or mangles the frame.
   CanMsg tx;
+  memset(&tx, 0, sizeof(tx));
   tx.id = id;
   tx.data_length = len;
   memcpy(tx.data, data, len);
-  if (CAN.write(tx)) {
+
+  // Retry for up to 10 ms to allow the TX mailbox to drain between back-to-back frames.
+  const uint32_t txTimeoutUs = 10000UL;
+  uint32_t startUs = micros();
+  bool ok = false;
+  do {
+    ok = CAN.write(tx);
+    if (!ok) {
+      delayMicroseconds(100);
+    }
+  } while (!ok && (micros() - startUs < txTimeoutUs));
+
+  if (ok) {
     if (canTxCount != 0xFFFF) {
       canTxCount++;
     }
+    // Brief gap so the controller starts transmitting this frame before the
+    // next CAN.write() call — otherwise back-to-back writes can clash on the
+    // RA4M1 single TX mailbox even when write() returns true.
+    delayMicroseconds(150);
   } else {
     if (canTxFail != 0xFFFF) {
       canTxFail++;
@@ -654,38 +647,31 @@ static void sendTxFrames() {
     }
   }
 
-  // TX BaseID: AV1-AV4
-  uint8_t tx0[8];
-  memset(tx0, 0, sizeof(tx0));
-  for (int i = 0; i < 4; i++) {
-    tx0[i * 2] = static_cast<uint8_t>(analogRaw[i] & 0xFF);
-    tx0[i * 2 + 1] = static_cast<uint8_t>((analogRaw[i] >> 8) & 0xFF);
-  }
-  sendCanFrame(config.txBaseId, tx0, 8);
+  ModeTxFrame frame;
+  ModeTxFrame frame1;
 
-  // TX BaseID+1: AV5-AV8
-  uint8_t tx1[8];
-  memset(tx1, 0, sizeof(tx1));
-  for (int i = 0; i < 4; i++) {
-    uint16_t val = analogRaw[i + 4];
-    tx1[i * 2] = static_cast<uint8_t>(val & 0xFF);
-    tx1[i * 2 + 1] = static_cast<uint8_t>((val >> 8) & 0xFF);
+  canModeBuildTxAnalogFrames(config.canMode, config.txBaseId, analogRaw, frame, frame1);
+  if (frame.len > 0) {
+    sendCanFrame(frame.id, frame.data, frame.len);
   }
-  sendCanFrame(config.txBaseId + 1, tx1, 8);
+  if (frame1.len > 0) {
+    sendCanFrame(frame1.id, frame1.data, frame1.len);
+  }
 
-  // TX BaseID+2: state masks + FW version
-  uint8_t tx2[8] = {0};
-  tx2[0] = digitalInMask;
-  tx2[1] = analogStateMask;
-  tx2[2] = digitalOutMask;
-  tx2[3] = config.safeMask;
-  tx2[4] = config.activeMask;
-  tx2[7] = FW_VERSION;
-  sendCanFrame(config.txBaseId + 2, tx2, 8);
+  canModeBuildTxStateFrame(config.canMode,
+                           config.txBaseId,
+                           digitalInMask,
+                           analogStateMask,
+                           digitalOutMask,
+                           config.safeMask,
+                           config.activeMask,
+                           FW_VERSION,
+                           frame);
+  if (frame.len > 0) {
+    sendCanFrame(frame.id, frame.data, frame.len);
+  }
 
   auto packFreqDuty = [&](uint8_t baseIndex, uint32_t baseId) {
-    uint8_t tx[8] = {0};
-
     uint32_t period0, high0;
     bool has0;
     uint32_t period1, high1;
@@ -700,35 +686,23 @@ static void sendTxFrames() {
     has1 = diHasPeriod[baseIndex + 1];
     interrupts();
 
-    uint16_t freq0 = 0;
-    uint16_t freq1 = 0;
-    uint8_t duty0 = 0;
-    uint8_t duty1 = 0;
-
     uint32_t timerFreq0 = diTimerFreq[baseIndex];
     uint32_t timerFreq1 = diTimerFreq[baseIndex + 1];
 
-    if (has0 && period0 > 0 && timerFreq0 > 0) {
-      freq0 = static_cast<uint16_t>(min<uint32_t>(65535, timerFreq0 / period0));
-      if (high0 > 0) {
-        duty0 = static_cast<uint8_t>(min<uint32_t>(255, (high0 * 255UL) / period0));
-      }
+    canModeBuildTxDiPairFrame(config.canMode,
+                              baseId,
+                              timerFreq0,
+                              period0,
+                              high0,
+                              has0,
+                              timerFreq1,
+                              period1,
+                              high1,
+                              has1,
+                              frame);
+    if (frame.len > 0) {
+      sendCanFrame(frame.id, frame.data, frame.len);
     }
-    if (has1 && period1 > 0 && timerFreq1 > 0) {
-      freq1 = static_cast<uint16_t>(min<uint32_t>(65535, timerFreq1 / period1));
-      if (high1 > 0) {
-        duty1 = static_cast<uint8_t>(min<uint32_t>(255, (high1 * 255UL) / period1));
-      }
-    }
-
-    tx[0] = static_cast<uint8_t>(freq0 & 0xFF);
-    tx[1] = static_cast<uint8_t>((freq0 >> 8) & 0xFF);
-    tx[2] = duty0;
-    tx[4] = static_cast<uint8_t>(freq1 & 0xFF);
-    tx[5] = static_cast<uint8_t>((freq1 >> 8) & 0xFF);
-    tx[6] = duty1;
-
-    sendCanFrame(baseId, tx, 8);
   };
 
   packFreqDuty(0, config.txBaseId + 3);
@@ -736,19 +710,21 @@ static void sendTxFrames() {
   packFreqDuty(4, config.txBaseId + 5);
   packFreqDuty(6, config.txBaseId + 6);
 
-  uint8_t txStatus[8] = {0};
-  bool canSilent = (lastCanRxMs == 0) ? (millis() > config.rxTimeoutMs) : (millis() - lastCanRxMs > config.rxTimeoutMs);
-  txStatus[0] = (canInitOk ? 0x01 : 0x00) |
-                (canSilent ? 0x02 : 0x00) |
-                (outputsInSafeState ? 0x04 : 0x00);
-  txStatus[1] = static_cast<uint8_t>(canRxCount & 0xFF);
-  txStatus[2] = static_cast<uint8_t>((canRxCount >> 8) & 0xFF);
-  txStatus[3] = static_cast<uint8_t>(canTxCount & 0xFF);
-  txStatus[4] = static_cast<uint8_t>((canTxCount >> 8) & 0xFF);
-  txStatus[5] = static_cast<uint8_t>(canTxFail & 0xFF);
-  txStatus[6] = static_cast<uint8_t>((canTxFail >> 8) & 0xFF);
-  txStatus[7] = config.canMode;
-  sendCanFrame(config.txBaseId + 7, txStatus, 8);
+  Mode0Status modeStatus;
+  modeStatus.canInitOk = canInitOk;
+  modeStatus.outputsInSafeState = outputsInSafeState;
+  modeStatus.canRxCount = canRxCount;
+  modeStatus.canTxCount = canTxCount;
+  modeStatus.canTxFail = canTxFail;
+  modeStatus.canMode = config.canMode;
+  modeStatus.lastCanRxMs = lastCanRxMs;
+  modeStatus.rxTimeoutMs = config.rxTimeoutMs;
+  modeStatus.nowMs = millis();
+
+  canModeBuildTxStatusFrame(config.canMode, config.txBaseId, modeStatus, frame);
+  if (frame.len > 0) {
+    sendCanFrame(frame.id, frame.data, frame.len);
+  }
 }
 
 static void printDiag() {
@@ -865,7 +841,7 @@ static void printHelp() {
   Serial.println("  RXBASE <hex>           - Set CAN RX base ID");
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
-  Serial.println("  CANMODE <0-15>          - Set CAN mode (NeoPixel color)");
+  Serial.println("  CANMODE <0-15>          - Set CAN mode");
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
   Serial.println("  OUTFREQ <ch> <hz>       - Set output channel PWM frequency (1-8)");
   Serial.println("  CONFIG                 - Print stored configuration");
@@ -1015,7 +991,10 @@ static void printConfig() {
   Serial.print(config.rxTimeoutMs);
   Serial.println(" ms");
   Serial.print("CAN Mode: ");
-  Serial.println(config.canMode);
+  Serial.print(config.canMode);
+  Serial.print(" (");
+  Serial.print(canModeName(config.canMode));
+  Serial.println(")");
   Serial.print("Safe Mask: 0x");
   Serial.println(config.safeMask, HEX);
   Serial.print("Active Mask: 0x");
@@ -1191,6 +1170,10 @@ static void handleSerial() {
 
   if (cmd.startsWith("CANMODE")) {
     uint8_t mode = static_cast<uint8_t>(getArg(1).toInt());
+    if (mode >= CAN_MODE_COUNT) {
+      Serial.println("ERR: CANMODE <0-15>");
+      return;
+    }
     config.canMode = mode;
     saveConfig();
     Serial.println("OK");
