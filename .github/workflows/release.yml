@@ -1,0 +1,67 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: platformio run -e uno_r4_minima
+
+      - name: Rename binary with version tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          cp .pio/build/uno_r4_minima/firmware.bin PT-IO-Mini2-${TAG}.bin
+          echo "BIN_NAME=PT-IO-Mini2-${TAG}.bin" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PT-IO-Mini2 ${{ github.ref_name }}
+          body: |
+            ## PT-IO-Mini2 Firmware ${{ github.ref_name }}
+
+            ### Flashing instructions
+            **Method 1 — Arduino IDE**
+            1. Put the board into bootloader mode: double-press the RESET button (the LED will pulse)
+            2. Arduino IDE → Sketch → Upload Compiled Binary → select this `.bin` file
+            3. Select the correct COM port and click Upload
+
+            **Method 2 — command line (dfu-util)**
+            ```
+            dfu-util -d 2341:0369 -a 0 --dfuse-address 0x08000000 -D PT-IO-Mini2-${{ github.ref_name }}.bin
+            ```
+
+            ### Modes supported
+            | Mode | Protocol |
+            |------|----------|
+            | 0 | PT Default 1 |
+            | 1 | Haltech IO12A |
+            | 2 | Haltech IO12B |
+            | 3 | Haltech IO12A&B |
+            | 4 | Haltech IO16A |
+            | 5 | Haltech IO16B |
+            | 6 | ECU Master CANSWB v3 (stub) |
+            | 7 | Motec E888 (stub) |
+            | 8 | Emtron (stub) |
+          files: ${{ env.BIN_NAME }}
+          draft: false
+          prerelease: false
