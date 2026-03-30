@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <Arduino_CAN.h>
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
@@ -77,7 +77,7 @@ const uint8_t BRIGHTNESS = 26; // 10% of 255
 
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
-const uint8_t CONFIG_VERSION = 1;
+const uint8_t CONFIG_VERSION = 2;
 
 struct Config {
   uint16_t magic;
@@ -91,7 +91,8 @@ struct Config {
   uint8_t safeMask;
   uint8_t activeMask;
   uint8_t canMode;
-  uint8_t reserved[3];
+  uint8_t inputPullupMask;
+  uint8_t reserved[2];
   uint16_t crc;
 };
 
@@ -107,6 +108,9 @@ bool adc_ready = false;
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
 uint16_t outputFreq[NUM_DIGITAL_OUT];
+uint32_t lastAppliedPwmCounts[6] = {0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL,
+                                    0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL};
+uint8_t lastAppliedGpioLevel[2] = {0xFFU, 0xFFU};
 
 uint32_t diTimerFreq[NUM_DIGITAL_IN];
 
@@ -136,6 +140,7 @@ uint16_t canRxCount = 0;
 uint16_t canTxCount = 0;
 uint16_t canTxFail = 0;
 bool serialOverride = false;  // when true, CAN watchdog is bypassed for serial testing
+bool rxDebug = false;         // when true, log RX duties, applyOutputs triggers and TX failures
 
 // Timers - input capture
 FspTimer gpt0; // DI4/DI5
@@ -143,28 +148,13 @@ FspTimer gpt1; // DI2/DI3
 FspTimer gpt2; // DI1/DI6
 FspTimer gpt3; // DI7/DI8
 
-// Software PWM tick timer
-// 10 kHz — keeps ISR CPU load under 20 % even at 24 MHz ICLK (UNO R4 Minima HOCO).
-// At 300 Hz output freq → period = 33 ticks ≈ 3 % duty resolution.
-#define SW_PWM_TICK_HZ 10000UL
-static volatile int8_t swPwmIrqNum = -1;  // IELSR slot allocated for AGT1
-
-struct SwPwmChannel {
-  volatile uint16_t period;    // ticks per cycle  (SW_PWM_TICK_HZ / freq)
-  volatile uint16_t highTicks; // ticks HIGH per cycle
-};
-SwPwmChannel swPwmCh[NUM_DIGITAL_OUT];
-uint16_t swPwmCounter[NUM_DIGITAL_OUT]; // ISR-only counter (not volatile — reduces ISR overhead)
-volatile uint32_t swPwmTickCount = 0;   // ISR tick counter for diagnostics
-
-// Precomputed PORT register pointers for fast ISR pin toggling
-// Uses POSR/PORR (atomic set/reset) — no PFS write-protection needed
-struct SwPwmPin {
-  volatile uint32_t *pcntr3; // PCNTR3 register (POSR=bits[15:0], PORR=bits[31:16])
-  uint32_t setVal;           // value to write to PCNTR3 to set pin HIGH
-  uint32_t clrVal;           // value to write to PCNTR3 to set pin LOW
-};
-SwPwmPin swPwmPins[NUM_DIGITAL_OUT];
+// Hardware PWM output timers (GPT4, GPT5, GPT6)
+FspTimer gpt4_out;  // DPO5-6  (GTIOC4A/4B)
+FspTimer gpt5_out;  // DPO1-2  (GTIOC5A/5B)
+FspTimer gpt6_out;  // DPO3-4  (GTIOC6A/6B)
+uint32_t gpt4PeriodCounts = 0;
+uint32_t gpt5PeriodCounts = 0;
+uint32_t gpt6PeriodCounts = 0;
 
 struct CaptureCtx {
   uint8_t idxA;
@@ -220,6 +210,14 @@ static void configureGpioOutput(bsp_io_port_pin_t pin, bool level) {
   R_BSP_PinAccessDisable();
 }
 
+static void writeGpioOutput(bsp_io_port_pin_t pin, bool level) {
+  uint8_t port = pin >> 8;
+  uint8_t bit = pin & 0xFF;
+  R_BSP_PinAccessEnable();
+  R_PFS->PORT[port].PIN[bit].PmnPFS_b.PODR = level ? 1 : 0;
+  R_BSP_PinAccessDisable();
+}
+
 static void configureGptPeripheral(bsp_io_port_pin_t pin) {
   pinPeripheral(pin, (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_PERIPHERAL_GPT1));
 }
@@ -228,6 +226,16 @@ static void configureGptPeripheralForChannel(bsp_io_port_pin_t pin, uint8_t chan
   (void)channel;
   R_IOPORT_PinCfg(&g_ioport_ctrl, pin,
                   (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_CFG_PIM_TTL | IOPORT_PERIPHERAL_GPT1));
+}
+
+static void applyInputPullups() {
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    uint32_t cfg = (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_CFG_PIM_TTL | IOPORT_PERIPHERAL_GPT1);
+    if (((config.inputPullupMask >> i) & 0x01U) != 0U) {
+      cfg |= IOPORT_CFG_PULLUP_ENABLE;
+    }
+    R_IOPORT_PinCfg(&g_ioport_ctrl, DIGITAL_IN_PINS[i], cfg);
+  }
 }
 
 static void initAdc() {
@@ -340,6 +348,7 @@ static void setDefaults(Config &cfg) {
   cfg.safeMask = 0x00;   // all outputs safe OFF
   cfg.activeMask = 0x00; // active LOW by default
   cfg.canMode = 0;
+  cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
   cfg.crc = computeCrc(cfg);
 }
@@ -347,6 +356,7 @@ static void setDefaults(Config &cfg) {
 static void saveConfig() {
   config.crc = computeCrc(config);
   EEPROM.put(0, config);
+  Serial.println("[EEPROM] config written");
 }
 
 static void loadConfig() {
@@ -360,7 +370,7 @@ static void loadConfig() {
     setDefaults(config);
     saveConfig();
   }
-  // Validate frequency values — corrupted EEPROM can yield garbage
+  // Validate frequency values â€” corrupted EEPROM can yield garbage
   for (int p = 0; p < 4; p++) {
     if (config.outFreqHz[p] < 50 || config.outFreqHz[p] > 10000) {
       config.outFreqHz[p] = DEFAULT_PWM_FREQ_HZ;
@@ -479,79 +489,136 @@ static bool setCanBitrate(uint16_t kbps) {
   return canInitOk;
 }
 
-// Software PWM tick ISR — bare-metal AGT1 underflow handler
-// Clears ICU IR + AGT1 underflow flag, then updates all 8 outputs via batched PCNTR3 writes.
-static void swPwmIsr() {
-  // 1. Clear ICU Interrupt Request bit — without this the IRQ re-fires endlessly
-  //    (same as R_BSP_IrqStatusClear in the FSP)
-  IRQn_Type irq = R_FSP_CurrentIrqGet();
-  R_ICU->IELSR_b[irq].IR = 0U;
+// swPwmIsr removed - using hardware PWM instead
 
-  // 2. Clear AGT1 underflow flag (write 0 to TUNDF, preserve TSTART)
-  R_AGT1->AGTCR = R_AGT1->AGTCR & ~(R_AGT0_AGTCR_TUNDF_Msk |
-                                       R_AGT0_AGTCR_TCMAF_Msk |
-                                       R_AGT0_AGTCR_TCMBF_Msk |
-                                       R_AGT0_AGTCR_TEDGF_Msk);
-  __DSB();  // Ensure writes complete before ISR returns
-
-  swPwmTickCount++;
-
-  // Accumulate POSR/PORR bits per port, then write once per port
-  uint32_t p4 = 0, p3 = 0, p1 = 0;
-
-  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
-    uint16_t cnt = swPwmCounter[i] + 1;
-    if (cnt >= swPwmCh[i].period) cnt = 0;
-    swPwmCounter[i] = cnt;
-    if (cnt < swPwmCh[i].highTicks) {
-      if (i < 4) p4 |= swPwmPins[i].setVal;
-      else if (i < 7) p3 |= swPwmPins[i].setVal;
-      else p1 |= swPwmPins[i].setVal;
-    } else {
-      if (i < 4) p4 |= swPwmPins[i].clrVal;
-      else if (i < 7) p3 |= swPwmPins[i].clrVal;
-      else p1 |= swPwmPins[i].clrVal;
-    }
-  }
-
-  *swPwmPins[0].pcntr3 = p4;  // PORT4
-  *swPwmPins[4].pcntr3 = p3;  // PORT3
-  *swPwmPins[7].pcntr3 = p1;  // PORT1
-}
-
-// Update software PWM parameters for all 8 output channels
+// Apply output values using hardware PWM (GPT4, GPT5, GPT6) and GPIO
 static void applyOutputs(bool useSafeState) {
+  uint8_t newDuty[NUM_DIGITAL_OUT];
+
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t duty = outputDuty[i];
     if (useSafeState) {
       bool safeOn = (config.safeMask >> i) & 0x01;
       duty = safeOn ? 255 : 0;
     }
-    // Map 0-255 duty to a 0.0-1.0 fraction, apply polarity
-    float dutyFrac = static_cast<float>(duty) / 255.0f;
     bool activeHigh = (config.activeMask >> i) & 0x01;
-    if (!activeHigh) dutyFrac = 1.0f - dutyFrac;
+    if (!activeHigh) duty = 255 - duty;
+    newDuty[i] = duty;
+  }
 
-    uint16_t freq = outputFreq[i];
-    if (freq == 0) freq = DEFAULT_PWM_FREQ_HZ;
-    uint16_t period = static_cast<uint16_t>(SW_PWM_TICK_HZ / freq);
-    if (period < 2) period = 2;  // minimum 2 ticks for any toggling
-    uint16_t high = static_cast<uint16_t>(period * dutyFrac + 0.5f);
-    if (duty == 255 && activeHigh)  high = period; // guarantee 100 %
-    if (duty == 0   && activeHigh)  high = 0;      // guarantee   0 %
-    if (duty == 255 && !activeHigh) high = 0;
-    if (duty == 0   && !activeHigh) high = period;
+  // Update hardware PWM using set_duty_cycle
+  // set_duty_cycle expects counts 0..period, so scale from 0-255
+  // Cap max to period-1 to ensure compare logic works properly
+  
+  // Channels 0-1: GPT5 (DPO1-2, GTIOC5B/5A)
+  if (gpt5_out.is_opened()) {
+    uint32_t period = gpt5PeriodCounts;
+    if (period < 2U) {
+      period = gpt5_out.get_period_raw();
+      gpt5PeriodCounts = period;
+    }
+    if (period < 2U) {
+      period = 2U;
+    }
+    uint32_t counts0 = (period * (uint32_t)newDuty[0]) / 255;
+    uint32_t counts1 = (period * (uint32_t)newDuty[1]) / 255;
+    if (counts0 >= period) counts0 = period - 1;
+    if (counts1 >= period) counts1 = period - 1;
+      if (lastAppliedPwmCounts[0] != counts0) {
+      if (rxDebug) { Serial.print("[PWM DPO1 "); Serial.print(lastAppliedPwmCounts[0]); Serial.print("->"); Serial.print(counts0); Serial.println("]"); }
+      gpt5_out.set_duty_cycle(counts0, CHANNEL_B);  // DPO1
+      lastAppliedPwmCounts[0] = counts0;
+    }
+    if (lastAppliedPwmCounts[1] != counts1) {
+      if (rxDebug) { Serial.print("[PWM DPO2 "); Serial.print(lastAppliedPwmCounts[1]); Serial.print("->"); Serial.print(counts1); Serial.println("]"); }
+      gpt5_out.set_duty_cycle(counts1, CHANNEL_A);  // DPO2
+      lastAppliedPwmCounts[1] = counts1;
+    }
+  }
 
-    noInterrupts();
-    swPwmCh[i].period    = period;
-    swPwmCh[i].highTicks = high;
-    if (swPwmCounter[i] >= period) swPwmCounter[i] = 0;
-    interrupts();
+  // Channels 2-3: GPT6 (DPO3-4, GTIOC6B/6A)
+  if (gpt6_out.is_opened()) {
+    uint32_t period = gpt6PeriodCounts;
+    if (period < 2U) {
+      period = gpt6_out.get_period_raw();
+      gpt6PeriodCounts = period;
+    }
+    if (period < 2U) {
+      period = 2U;
+    }
+    uint32_t counts2 = (period * (uint32_t)newDuty[2]) / 255;
+    uint32_t counts3 = (period * (uint32_t)newDuty[3]) / 255;
+    if (counts2 >= period) counts2 = period - 1;
+    if (counts3 >= period) counts3 = period - 1;
+    if (lastAppliedPwmCounts[2] != counts2) {
+      if (rxDebug) { Serial.print("[PWM DPO3 "); Serial.print(lastAppliedPwmCounts[2]); Serial.print("->"); Serial.print(counts2); Serial.println("]"); }
+      gpt6_out.set_duty_cycle(counts2, CHANNEL_B);  // DPO3
+      lastAppliedPwmCounts[2] = counts2;
+    }
+    if (lastAppliedPwmCounts[3] != counts3) {
+      if (rxDebug) { Serial.print("[PWM DPO4 "); Serial.print(lastAppliedPwmCounts[3]); Serial.print("->"); Serial.print(counts3); Serial.println("]"); }
+      gpt6_out.set_duty_cycle(counts3, CHANNEL_A);  // DPO4
+      lastAppliedPwmCounts[3] = counts3;
+    }
+  }
+
+  // Channels 4-5: GPT4 (DPO5-6, GTIOC4A/4B)
+  if (gpt4_out.is_opened()) {
+    uint32_t period = gpt4PeriodCounts;
+    if (period < 2U) {
+      period = gpt4_out.get_period_raw();
+      gpt4PeriodCounts = period;
+    }
+    if (period < 2U) {
+      period = 2U;
+    }
+    uint32_t counts4 = (period * (uint32_t)newDuty[4]) / 255;
+    uint32_t counts5 = (period * (uint32_t)newDuty[5]) / 255;
+    if (counts4 >= period) counts4 = period - 1;
+    if (counts5 >= period) counts5 = period - 1;
+    if (lastAppliedPwmCounts[4] != counts4) {
+      if (rxDebug) { Serial.print("[PWM DPO5 "); Serial.print(lastAppliedPwmCounts[4]); Serial.print("->"); Serial.print(counts4); Serial.println("]"); }
+      gpt4_out.set_duty_cycle(counts4, CHANNEL_A);  // DPO5
+      lastAppliedPwmCounts[4] = counts4;
+    }
+    if (lastAppliedPwmCounts[5] != counts5) {
+      if (rxDebug) { Serial.print("[PWM DPO6 "); Serial.print(lastAppliedPwmCounts[5]); Serial.print("->"); Serial.print(counts5); Serial.println("]"); }
+      gpt4_out.set_duty_cycle(counts5, CHANNEL_B);  // DPO6
+      lastAppliedPwmCounts[5] = counts5;
+    }
+  }
+
+  // Channels 6-7: GPIO (DPO7-8, P300/P108)
+  // These outputs are active-low at the pin, so logical ON drives LOW.
+  uint8_t gpio6Level = (newDuty[6] > 127) ? 0U : 1U;
+  uint8_t gpio7Level = (newDuty[7] > 127) ? 0U : 1U;
+  if (lastAppliedGpioLevel[0] != gpio6Level) {
+    writeGpioOutput(DIGITAL_OUT_PINS[6], gpio6Level != 0U);
+    lastAppliedGpioLevel[0] = gpio6Level;
+  }
+  if (lastAppliedGpioLevel[1] != gpio7Level) {
+    writeGpioOutput(DIGITAL_OUT_PINS[7], gpio7Level != 0U);
+    lastAppliedGpioLevel[1] = gpio7Level;
   }
 }
 
+// Pending config save flag â€” deferred so EEPROM writes never happen inside
+// the CAN drain loop (flash writes can block for ms and stall the SW PWM ISR).
+static bool pendingConfigSave = false;
+
 static void handleCanRx(const CanMsg &msg) {
+  if (serialOverride) {
+    return;
+  }
+
+  // Snapshot duty/freq so we can detect whether outputs actually changed
+  uint8_t  prevDuty[NUM_DIGITAL_OUT];
+  uint16_t prevFreq[NUM_DIGITAL_OUT];
+  memcpy(prevDuty, outputDuty, sizeof(prevDuty));
+  memcpy(prevFreq, outputFreq, sizeof(prevFreq));
+
   bool changed = false;
+  bool pullupChanged = false;
   bool handled = canModeHandleRx(config.canMode,
                                  msg,
                                  config.rxBaseId,
@@ -560,33 +627,72 @@ static void handleCanRx(const CanMsg &msg) {
                                  outputDuty,
                                  config.safeMask,
                                  config.activeMask,
-                                 changed);
+                                 changed,
+                                 config.inputPullupMask,
+                                 pullupChanged);
 
   if (!handled) {
     return;
   }
 
-  if (changed) {
-    saveConfig();
+  // Defer EEPROM writes â€” never call saveConfig() from within the CAN drain
+  // loop; schedule it so it runs once after the loop exits.
+  if (changed || pullupChanged) {
+    pendingConfigSave = true;
   }
 
-  outputsInSafeState = false;
-  applyOutputs(false);
+  if (pullupChanged) {
+    applyInputPullups();
+  }
+
+  // Only re-apply PWM when output behavior can change:
+  //  - duty/freq changed
+  //  - safe/active mask changed
+  //  - we were in safe state and need to restore commanded outputs
+  bool outputsChanged = (memcmp(prevDuty, outputDuty, sizeof(prevDuty)) != 0) ||
+                        (memcmp(prevFreq, outputFreq, sizeof(prevFreq)) != 0);
+  if (pullupChanged && !outputsChanged && !changed) {
+    return;
+  }
+
+  if (outputsChanged || changed || outputsInSafeState) {
+    if (rxDebug) {
+      Serial.print("[OUT id=0x"); Serial.print(msg.id, HEX);
+      Serial.print(" trig=");
+      if (outputsInSafeState) Serial.print("safe");
+      else if (changed)       Serial.print("mask");
+      else                    Serial.print("duty");
+      Serial.print(" d=");
+      for (int _i = 0; _i < NUM_DIGITAL_OUT; _i++) {
+        if (_i) Serial.print(',');
+        Serial.print(outputDuty[_i]);
+      }
+      Serial.println("]");
+    }
+    outputsInSafeState = false;
+    applyOutputs(false);
+  }
 }
 
 static void processCan() {
-  while (CAN.available()) {
+  // Drain a bounded number of frames per loop iteration to prevent starvation
+  // of serial/USB and other foreground work under heavy CAN traffic.
+  // Any remaining frames will be picked up on the next loop().
+  const uint8_t MAX_RX_PER_LOOP = 12;
+  uint8_t count = 0;
+  while (CAN.available() && count < MAX_RX_PER_LOOP) {
     CanMsg msg = CAN.read();
     lastCanRxMs = millis();
     if (canRxCount != 0xFFFF) {
       canRxCount++;
     }
     handleCanRx(msg);
+    count++;
   }
 }
 
 static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
-  // Zero-init the whole struct — CanMsg has fields beyond id/data_length/data
+  // Zero-init the whole struct â€” CanMsg has fields beyond id/data_length/data
   // (e.g. rtr, extended flags) that the RA4M1 CAN controller reads.
   // Without this, those fields are garbage on calls 2-N and the controller
   // rejects or mangles the frame.
@@ -596,26 +702,27 @@ static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
   tx.data_length = len;
   memcpy(tx.data, data, len);
 
-  // Retry for up to 10 ms to allow the TX mailbox to drain between back-to-back frames.
-  const uint32_t txTimeoutUs = 10000UL;
+  // Bounded retry so burst TX frames are not dropped on a busy mailbox,
+  // but without long blocking delays that starve foreground work.
+  const uint32_t txTimeoutUs = 1200UL;
   uint32_t startUs = micros();
   bool ok = false;
   do {
     ok = CAN.write(tx);
     if (!ok) {
-      delayMicroseconds(100);
+      delayMicroseconds(20);
     }
   } while (!ok && (micros() - startUs < txTimeoutUs));
 
   if (ok) {
+    delayMicroseconds(150);  // one frame-time at 1Mbps; ensures mailbox is free for next send
     if (canTxCount != 0xFFFF) {
       canTxCount++;
     }
-    // Brief gap so the controller starts transmitting this frame before the
-    // next CAN.write() call — otherwise back-to-back writes can clash on the
-    // RA4M1 single TX mailbox even when write() returns true.
-    delayMicroseconds(150);
   } else {
+    if (rxDebug) {
+      Serial.print("[TX FAIL 0x"); Serial.print(tx.id, HEX); Serial.println("]");
+    }
     if (canTxFail != 0xFFFF) {
       canTxFail++;
     }
@@ -776,20 +883,14 @@ static void printDiag() {
     Serial.println();
   }
 
-  // SW PWM diagnostics — include AGT1 register dump
-  Serial.print("--- SW PWM: tickCount=");
-  Serial.print(swPwmTickCount);
-  Serial.print("  IRQslot="); Serial.print(swPwmIrqNum);
-  Serial.println(" ---");
-  Serial.print("AGT1: AGT=0x"); Serial.print(R_AGT1->AGT, HEX);
-  Serial.print(" AGTCR=0x"); Serial.print(R_AGT1->AGTCR, HEX);
-  Serial.print(" AGTMR1=0x"); Serial.print(R_AGT1->AGTMR1, HEX);
-  Serial.print(" AGTMR2=0x"); Serial.print(R_AGT1->AGTMR2, HEX);
-  if (swPwmIrqNum >= 0) {
-    Serial.print(" IELSR=0x"); Serial.print(R_ICU->IELSR[swPwmIrqNum], HEX);
-    Serial.print(" NVIC="); Serial.print(NVIC_GetEnableIRQ((IRQn_Type)swPwmIrqNum) ? "EN" : "DIS");
-  }
-  Serial.println();
+  // Hardware PWM diagnostics
+  Serial.println("--- HW PWM (GPT4/5/6) ---");
+  Serial.print("GPT4 open="); Serial.print(gpt4_out.is_opened() ? "YES" : "NO");
+  Serial.print(" period="); Serial.print(gpt4_out.is_opened() ? gpt4_out.get_period_raw() : 0);
+  Serial.print("  GPT5 open="); Serial.print(gpt5_out.is_opened() ? "YES" : "NO");
+  Serial.print(" period="); Serial.print(gpt5_out.is_opened() ? gpt5_out.get_period_raw() : 0);
+  Serial.print("  GPT6 open="); Serial.print(gpt6_out.is_opened() ? "YES" : "NO");
+  Serial.print(" period="); Serial.println(gpt6_out.is_opened() ? gpt6_out.get_period_raw() : 0);
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
     uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
@@ -799,8 +900,7 @@ static void printDiag() {
     Serial.print("): PFS=0x"); Serial.print(pfs, HEX);
     Serial.print(" PDR="); Serial.print((pfs >> 2) & 1);
     Serial.print(" PMR="); Serial.print((pfs >> 16) & 1);
-    Serial.print(" period="); Serial.print(swPwmCh[i].period);
-    Serial.print(" high="); Serial.print(swPwmCh[i].highTicks);
+    Serial.print(" period=--; high=--");  // Hardware PWM
     Serial.println();
   }
 
@@ -835,6 +935,7 @@ static void printHelp() {
   Serial.println("  HELP                  - Show this help");
   Serial.println("  STATUS                - Print one-time status report");
   Serial.println("  MONITOR ON|OFF|<ms>    - Enable/disable status monitor or set interval");
+  Serial.println("  RXDBG ON|OFF           - Log RX duties, PWM changes and TX failures");
   Serial.println("  DIAG                  - Print capture timer diagnostics");
   Serial.println("  CANSPEED <kbps>        - Set CAN speed (125/250/500/1000)");
   Serial.println("  TXBASE <hex>           - Set CAN TX base ID");
@@ -845,8 +946,11 @@ static void printHelp() {
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
   Serial.println("  OUTFREQ <ch> <hz>       - Set output channel PWM frequency (1-8)");
   Serial.println("  CONFIG                 - Print stored configuration");
+  Serial.println("  SERIALOVERRIDE ON|OFF  - Enable/disable serial test override");
   Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-8)");
   Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-8)");
+  Serial.println("  DIPULLUP <ch> <0|1>      - Set DI internal pull-up (1-8)");
+  Serial.println("  DIPULLUPMASK <hex>       - Set DI pull-up bitmask (bit0=DI1..bit7=DI8)");
   Serial.println("  DEFAULTS                - Reset all config to factory defaults");
   Serial.println();
 }
@@ -937,7 +1041,7 @@ static void printStatusOnce() {
   }
 
   Serial.println();
-  Serial.println("--- Digital Outputs ---");
+  Serial.println("--- Digital Outputs (Hardware PWM) ---");
   Serial.print("SafeState=");
   Serial.print(outputsInSafeState ? "YES" : "NO");
   Serial.print("  lastCanRxMs=");
@@ -946,8 +1050,8 @@ static void printStatusOnce() {
   Serial.print(millis());
   Serial.print("  timeout=");
   Serial.print(config.rxTimeoutMs);
-  Serial.print("  swPwmTicks=");
-  Serial.println(swPwmTickCount);
+  Serial.print("  HW_PWM=");
+  Serial.println((gpt4_out.is_opened() && gpt5_out.is_opened() && gpt6_out.is_opened()) ? "OK" : "ERR");
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     bool state = readDigitalOut(i);
     uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
@@ -963,12 +1067,13 @@ static void printStatusOnce() {
     Serial.print(outputDuty[i]);
     Serial.print("/255, freq=");
     Serial.print(outputFreq[i]);
-    Serial.print(" Hz, PDR=");
-    Serial.print((pfs >> 2) & 1);
-    Serial.print(" hi=");
-    Serial.print(swPwmCh[i].highTicks);
-    Serial.print("/");
-    Serial.print(swPwmCh[i].period);
+    Serial.print(" Hz, type=");
+    if (i < 6) {
+      Serial.print("GPT");
+      Serial.print((i < 2) ? "5" : (i < 4) ? "6" : "4");
+    } else {
+      Serial.print("GPIO");
+    }
     Serial.println();
   }
 
@@ -995,10 +1100,14 @@ static void printConfig() {
   Serial.print(" (");
   Serial.print(canModeName(config.canMode));
   Serial.println(")");
+  Serial.print("Serial Override: ");
+  Serial.println(serialOverride ? "ON" : "OFF");
   Serial.print("Safe Mask: 0x");
   Serial.println(config.safeMask, HEX);
   Serial.print("Active Mask: 0x");
   Serial.println(config.activeMask, HEX);
+  Serial.print("DI Pullup Mask: 0x");
+  Serial.println(config.inputPullupMask, HEX);
   Serial.print("Out Freq Pair 1: ");
   Serial.print(config.outFreqHz[0]);
   Serial.println(" Hz");
@@ -1114,6 +1223,23 @@ static void handleSerial() {
     return cmd.substring(start, end);
   };
 
+  if (cmd.startsWith("SERIALOVERRIDE")) {
+    String arg = getArg(1);
+    arg.trim();
+    if (arg == "ON") {
+      serialOverride = true;
+      Serial.println("OK: Serial override ON");
+      return;
+    }
+    if (arg == "OFF") {
+      serialOverride = false;
+      Serial.println("OK: Serial override OFF");
+      return;
+    }
+    Serial.println("ERR: SERIALOVERRIDE ON|OFF");
+    return;
+  }
+
   if (cmd.startsWith("CANSPEED")) {
     uint16_t kbps = static_cast<uint16_t>(getArg(1).toInt());
     if (!setCanBitrate(kbps)) {
@@ -1216,6 +1342,39 @@ static void handleSerial() {
     return;
   }
 
+  if (cmd.startsWith("DIPULLUPMASK")) {
+    String arg = getArg(1);
+    if (arg.length() == 0) {
+      Serial.println("ERR: DIPULLUPMASK <hex>");
+      return;
+    }
+    uint8_t mask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0));
+    config.inputPullupMask = mask;
+    applyInputPullups();
+    saveConfig();
+    Serial.print("OK: DI pull-up mask=0x");
+    Serial.println(config.inputPullupMask, HEX);
+    return;
+  }
+
+  if (cmd.startsWith("DIPULLUP")) {
+    uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
+    uint8_t val = static_cast<uint8_t>(getArg(2).toInt());
+    if (ch < 1 || ch > 8 || val > 1) {
+      Serial.println("ERR: DIPULLUP <1-8> <0|1>");
+      return;
+    }
+    uint8_t mask = static_cast<uint8_t>(1U << (ch - 1U));
+    config.inputPullupMask = static_cast<uint8_t>((config.inputPullupMask & ~mask) | (val ? mask : 0U));
+    applyInputPullups();
+    saveConfig();
+    Serial.print("OK: DI");
+    Serial.print(ch);
+    Serial.print(" pull-up ");
+    Serial.println(val ? "ON" : "OFF");
+    return;
+  }
+
   if (cmd.startsWith("OUT ") && !cmd.startsWith("OUTFREQ")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     int pct = getArg(2).toInt();
@@ -1230,6 +1389,18 @@ static void handleSerial() {
     applyOutputs(false);
     Serial.print("OK: DPO"); Serial.print(ch);
     Serial.print(" = "); Serial.print(pct); Serial.println("%");
+    Serial.println("INFO: Serial override ON (CAN output control paused)");
+    return;
+  }
+
+  if (cmd == "RXDBG ON" || cmd == "RXDBG OFF") {
+    rxDebug = (cmd == "RXDBG ON");
+    Serial.print("OK: RXDBG "); Serial.println(rxDebug ? "ON" : "OFF");
+    if (rxDebug) {
+      Serial.println("  [OUT id=...] logged on each applyOutputs trigger");
+      Serial.println("  [PWM DPOn old->new] logged on each set_duty_cycle call");
+      Serial.println("  [TX FAIL 0xID] logged on each TX frame drop");
+    }
     return;
   }
 
@@ -1259,101 +1430,64 @@ static void handleSerial() {
   Serial.println("ERR: Unknown command. Type HELP");
 }
 
-static void initSwPwm() {
-  // Configure ALL 8 output pins as plain GPIO outputs (LOW initially)
-  // and precompute PORT register pointers for fast ISR toggling
-  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
-    configureGpioOutput(DIGITAL_OUT_PINS[i], false);
-    swPwmCh[i].period    = static_cast<uint16_t>(SW_PWM_TICK_HZ / DEFAULT_PWM_FREQ_HZ);
-    swPwmCh[i].highTicks = 0;
-    swPwmCounter[i]      = 0;
+// Initialize hardware PWM using GPT4, GPT5, GPT6 for 6 channels + GPIO for 2 channels
+static void initHardwarePwm() {
+  // Configure output pin modes
+  configureGpioOutput(DIGITAL_OUT_PINS[6], false);  // DPO7 - GPIO only
+  configureGpioOutput(DIGITAL_OUT_PINS[7], false);  // DPO8 - GPIO only
 
-    // PORT registers are spaced 0x20 bytes apart from R_PORT0
-    uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
-    uint8_t pin  = DIGITAL_OUT_PINS[i] & 0xFF;
-    R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + port * 0x20u);
-    swPwmPins[i].pcntr3 = &portReg->PCNTR3;
-    uint32_t pinBit = (1u << pin);
-    swPwmPins[i].setVal = pinBit;              // POSR = bits[15:0]
-    swPwmPins[i].clrVal = pinBit << 16;        // PORR = bits[31:16]
-  }
+  uint32_t pwmFreq = DEFAULT_PWM_FREQ_HZ;
+  
+  // GPT5: Channels 0-1 (DPO1-2, P408-P409)
+  configureGptPeripheral(DIGITAL_OUT_PINS[0]);  // P408 - DPO1
+  configureGptPeripheral(DIGITAL_OUT_PINS[1]);  // P409 - DPO2
+  FspTimer::force_use_of_pwm_reserved_timer();
+  gpt5_out.begin(TIMER_MODE_PWM, GPT_TIMER, 5, pwmFreq, 50.0f);
+  gpt5_out.add_pwm_extended_cfg();
+  gpt5_out.enable_pwm_channel(CHANNEL_B);  // DPO1 on GTIOC5B
+  gpt5_out.enable_pwm_channel(CHANNEL_A);  // DPO2 on GTIOC5A
+  gpt5_out.open();
+  gpt5_out.set_duty_cycle(0, CHANNEL_B);  // Initialize to 0% duty
+  gpt5_out.set_duty_cycle(0, CHANNEL_A);
+  gpt5_out.start();
+  gpt5PeriodCounts = gpt5_out.get_period_raw();
 
-  // ---- Bare-metal AGT1 configuration (bypasses FspTimer entirely) ----
-  // Step 1: Enable AGT1 module (clear MSTPCRD.MSTPD2)
-  R_MSTP->MSTPCRD &= ~(1u << 2);
+  // GPT6: Channels 2-3 (DPO3-4, P410-P411)
+  configureGptPeripheral(DIGITAL_OUT_PINS[2]);  // P410 - DPO3
+  configureGptPeripheral(DIGITAL_OUT_PINS[3]);  // P411 - DPO4
+  FspTimer::force_use_of_pwm_reserved_timer();
+  gpt6_out.begin(TIMER_MODE_PWM, GPT_TIMER, 6, pwmFreq, 50.0f);
+  gpt6_out.add_pwm_extended_cfg();
+  gpt6_out.enable_pwm_channel(CHANNEL_B);  // DPO3 on GTIOC6B
+  gpt6_out.enable_pwm_channel(CHANNEL_A);  // DPO4 on GTIOC6A
+  gpt6_out.open();
+  gpt6_out.set_duty_cycle(0, CHANNEL_B);  // Initialize to 0% duty
+  gpt6_out.set_duty_cycle(0, CHANNEL_A);
+  gpt6_out.start();
+  gpt6PeriodCounts = gpt6_out.get_period_raw();
 
-  // Step 2: Stop AGT1 if running
-  R_AGT1->AGTCR = 0x04;  // TSTOP=1 → force stop, counter -> 0xFFFF
-  while (R_AGT1->AGTCR_b.TCSTF) {}  // Wait for stop to take effect
+  // GPT4: Channels 4-5 (DPO5-6, P302-P301)
+  configureGptPeripheral(DIGITAL_OUT_PINS[4]);  // P302 - DPO5
+  configureGptPeripheral(DIGITAL_OUT_PINS[5]);  // P301 - DPO6
+  FspTimer::force_use_of_pwm_reserved_timer();
+  gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, pwmFreq, 50.0f);
+  gpt4_out.add_pwm_extended_cfg();
+  gpt4_out.enable_pwm_channel(CHANNEL_A);  // DPO5 on GTIOC4A
+  gpt4_out.enable_pwm_channel(CHANNEL_B);  // DPO6 on GTIOC4B
+  gpt4_out.open();
+  gpt4_out.set_duty_cycle(0, CHANNEL_A);  // Initialize to 0% duty
+  gpt4_out.set_duty_cycle(0, CHANNEL_B);
+  gpt4_out.start();
+  gpt4PeriodCounts = gpt4_out.get_period_raw();
 
-  // Step 3: Configure count source and mode
-  //   AGTMR1: TCK[6:4]=000 (PCLKB), TMOD[2:0]=000 (timer mode)
-  R_AGT1->AGTMR1 = 0x00;
-  //   AGTMR2: CKS[2:0]=000 (no sub-division), LPM=0
-  R_AGT1->AGTMR2 = 0x00;
-
-  // Step 4: Set reload period
-  //   AGT is a 16-bit down-counter. It counts from AGT → 0, underflows, reloads.
-  //   Period = PCLKB / SW_PWM_TICK_HZ
-  const uint32_t pclkb = R_FSP_SystemClockHzGet(FSP_PRIV_CLOCK_PCLKB);
-  uint16_t reload = static_cast<uint16_t>(pclkb / SW_PWM_TICK_HZ - 1);
-  R_AGT1->AGT = reload;
-  Serial.print("[SWPWM] PCLKB="); Serial.print(pclkb);
-  Serial.print(" reload="); Serial.println(reload);
-
-  // Step 5: Disable output pins / compare match (we only want underflow IRQ)
-  R_AGT1->AGTIOC  = 0x00;
-  R_AGT1->AGTCMSR = 0x00;
-  R_AGT1->AGTCMA  = 0xFFFF;
-  R_AGT1->AGTCMB  = 0xFFFF;
-
-  // Step 6: Allocate IELSR slot for AGT1_INT and install our ISR
-  //   Use the IRQManager’s last_interrupt_index to get a free slot.
-  //   We can’t call IRQManager directly (private), but we CAN write IELSR
-  //   and the vector table manually, same way IRQManager does.
-  volatile uint32_t *irqVec = (volatile uint32_t *)SCB->VTOR;
-  // Find a free IELSR slot (scan from 31 DOWN  IRQManager fills from 0 up)
-  int slot = -1;
-  for (int i = 31; i >= 0; i--) {
-    if (R_ICU->IELSR[i] == 0) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot >= 0) {
-    // Link AGT1_INT event (33 = 0x21) to this IELSR slot
-    R_ICU->IELSR[slot] = 0x021;  // ELC_EVENT_AGT1_INT
-    // Install our bare ISR into the vector table
-    // VTOR points to the full vector table; programmable IRQs start at index 16 (after CM4 exceptions)
-    irqVec[16 + slot] = (uint32_t)swPwmIsr;
-    // Configure NVIC: set priority and enable
-    NVIC_SetPriority((IRQn_Type)slot, 14);
-    NVIC_ClearPendingIRQ((IRQn_Type)slot);
-    NVIC_EnableIRQ((IRQn_Type)slot);
-    swPwmIrqNum = (int8_t)slot;
-    Serial.print("[SWPWM] IRQ slot="); Serial.print(slot);
-    Serial.print(" IELSR=0x"); Serial.print(R_ICU->IELSR[slot], HEX);
-    Serial.println(" NVIC=EN");
-  } else {
-    Serial.println("[SWPWM] ERR: no free IELSR slot!");
-  }
-
-  // Step 7: Clear all flags and start the counter
-  R_AGT1->AGTCR = 0x01;  // TSTART=1, all flags cleared
-  Serial.print("[SWPWM] AGTCR=0x"); Serial.print(R_AGT1->AGTCR, HEX);
-  Serial.print(" TCSTF="); Serial.println(R_AGT1->AGTCR_b.TCSTF);
+  Serial.print("[HW PWM] GPT4/5/6 initialized at ");
+  Serial.print(pwmFreq);
+  Serial.println(" Hz");
 }
 
 static void initCaptureInputs() {
-  // Configure pins for GPT input capture
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[0], 2); // DI1 GPT2B
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[1], 1); // DI2 GPT1B
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[2], 1); // DI3 GPT1A
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[3], 0); // DI4 GPT0B
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[4], 0); // DI5 GPT0A
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[5], 2); // DI6 GPT2A
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[6], 3); // DI7 GPT3B
-  configureGptPeripheralForChannel(DIGITAL_IN_PINS[7], 3); // DI8 GPT3A
+  // Configure pins for GPT input capture and current pull-up mask
+  applyInputPullups();
 
   initCaptureTimer(gpt0, gpt0Ctx, 0, 4, 3); // GPT0: A=DI5, B=DI4
   initCaptureTimer(gpt1, gpt1Ctx, 1, 2, 1); // GPT1: A=DI3, B=DI2
@@ -1407,7 +1541,7 @@ void setup() {
     outputFreq[p * 2 + 1] = config.outFreqHz[p];
   }
 
-  initSwPwm();
+  initHardwarePwm();
   initCaptureInputs();
 
   // Initialize NeoPixel
@@ -1436,6 +1570,29 @@ void loop() {
 
   handleSerial();
   processCan();
+  // Refresh now after processCan() so that time-delta checks below (safe-state
+  // timeout, TX rate, LED, monitor) are never older than lastCanRxMs.  If the
+  // stale pre-processCan() value were used and processCan() updated lastCanRxMs
+  // to a newer millis(), unsigned subtraction (now - lastCanRxMs) would wrap to
+  // ~4 billion and trigger the RX-timeout safe-state every single loop.
+  now = millis();
+
+  // Deferred config save: EEPROM writes are never issued inside the CAN drain
+  // loop.  The pending flag is set by handleCanRx() and flushed here, with a
+  // 2-second quiet-period debounce so rapid CAN config packets only cause one
+  // EEPROM write.
+  static uint32_t configDirtyMs = 0;
+  if (pendingConfigSave) {
+    if (configDirtyMs == 0) {
+      configDirtyMs = now;
+    } else if (now - configDirtyMs >= 2000UL) {
+      saveConfig();
+      pendingConfigSave = false;
+      configDirtyMs     = 0;
+    }
+  } else {
+    configDirtyMs = 0;
+  }
 
   if (!outputsInSafeState && !serialOverride && (now - lastCanRxMs > config.rxTimeoutMs)) {
     applyOutputs(true);
@@ -1477,3 +1634,4 @@ void loop() {
     updateStatusLed(now);
   }
 }
+

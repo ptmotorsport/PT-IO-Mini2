@@ -51,7 +51,9 @@ bool mode0HandleRx(const CanMsg &msg,
                    uint8_t outputDuty[8],
                    uint8_t &safeMask,
                    uint8_t &activeMask,
-                   bool &maskChanged);
+                   bool &maskChanged,
+                   uint8_t &inputPullupMask,
+                   bool &pullupChanged);
 
 void mode0BuildTxAnalogFrames(uint16_t txBaseId,
                               const uint16_t analogRaw14[8],
@@ -92,7 +94,9 @@ bool canModeHandleRx(uint8_t mode,
                      uint8_t outputDuty[8],
                      uint8_t &safeMask,
                      uint8_t &activeMask,
-                     bool &maskChanged);
+                     bool &maskChanged,
+                     uint8_t &inputPullupMask,
+                     bool &pullupChanged);
 
 void canModeBuildTxAnalogFrames(uint8_t mode,
                                 uint16_t txBaseId,

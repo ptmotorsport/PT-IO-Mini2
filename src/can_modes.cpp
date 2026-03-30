@@ -208,10 +208,23 @@ bool mode0HandleRx(const CanMsg &msg,
                    uint8_t outputDuty[8],
                    uint8_t &safeMask,
                    uint8_t &activeMask,
-                   bool &maskChanged) {
+                   bool &maskChanged,
+                   uint8_t &inputPullupMask,
+                   bool &pullupChanged) {
   maskChanged = false;
+  pullupChanged = false;
 
   uint32_t id = msg.id;
+  if (id == (rxBaseId + 4U)) {
+    if (msg.data_length < 1) {
+      return false;
+    }
+    uint8_t newMask = msg.data[0];
+    pullupChanged = (newMask != inputPullupMask);
+    inputPullupMask = newMask;
+    return true;
+  }
+
   if (id < rxBaseId || id > (rxBaseId + 3U)) {
     return false;
   }
@@ -370,7 +383,9 @@ static bool modeStubHandleRx(const CanMsg &msg,
                              uint8_t outputDuty[8],
                              uint8_t &safeMask,
                              uint8_t &activeMask,
-                             bool &maskChanged) {
+             bool &maskChanged,
+             uint8_t &inputPullupMask,
+             bool &pullupChanged) {
   return mode0HandleRx(msg,
                        rxBaseId,
                        defaultPwmFreqHz,
@@ -378,7 +393,9 @@ static bool modeStubHandleRx(const CanMsg &msg,
                        outputDuty,
                        safeMask,
                        activeMask,
-                       maskChanged);
+           maskChanged,
+           inputPullupMask,
+           pullupChanged);
 }
 
 static void modeStubBuildTxAnalogFrames(uint16_t txBaseId,
@@ -441,8 +458,10 @@ static bool haltechIo16HandleRx(uint8_t mode,
                             uint8_t outputDuty[8],
                             uint8_t &safeMask,
                             uint8_t &activeMask,
-                            bool &maskChanged) {
+                            bool &maskChanged,
+                            bool &pullupChanged) {
   maskChanged = false;
+  pullupChanged = false;
 
   uint8_t bankStart = (mode == CAN_MODE_HALTECH_IO16B) ? 4 : 0;
 
@@ -539,8 +558,10 @@ static bool haltechIo12HandleRx(uint8_t mode,
                                 uint8_t outputDuty[8],
                                 uint8_t &safeMask,
                                 uint8_t &activeMask,
-                                bool &maskChanged) {
+                                bool &maskChanged,
+                                bool &pullupChanged) {
   maskChanged = false;
+  pullupChanged = false;
 
   auto applyFrame = [&](uint8_t channelStart) {
     if (msg.data_length < 6) {
@@ -636,7 +657,9 @@ bool canModeHandleRx(uint8_t mode,
                      uint8_t outputDuty[8],
                      uint8_t &safeMask,
                      uint8_t &activeMask,
-                     bool &maskChanged) {
+                     bool &maskChanged,
+                     uint8_t &inputPullupMask,
+                     bool &pullupChanged) {
   switch (mode) {
     case CAN_MODE_PT_DEFAULT1:
       return mode0HandleRx(msg,
@@ -646,7 +669,9 @@ bool canModeHandleRx(uint8_t mode,
                            outputDuty,
                            safeMask,
                            activeMask,
-                           maskChanged);
+                           maskChanged,
+                           inputPullupMask,
+                           pullupChanged);
 
     case CAN_MODE_HALTECH_IO16A:
     case CAN_MODE_HALTECH_IO16B:
@@ -657,7 +682,8 @@ bool canModeHandleRx(uint8_t mode,
                                  outputDuty,
                                  safeMask,
                                  activeMask,
-                                 maskChanged);
+                                 maskChanged,
+                                 pullupChanged);
 
     case CAN_MODE_HALTECH_IO12A:
     case CAN_MODE_HALTECH_IO12B:
@@ -670,7 +696,8 @@ bool canModeHandleRx(uint8_t mode,
                                  outputDuty,
                                  safeMask,
                                  activeMask,
-                                 maskChanged);
+                                 maskChanged,
+                                 pullupChanged);
 
     case CAN_MODE_ECUMASTER_CANSWB_V3:
     case CAN_MODE_MOTEC_E888:
@@ -689,10 +716,13 @@ bool canModeHandleRx(uint8_t mode,
                               outputDuty,
                               safeMask,
                               activeMask,
-                              maskChanged);
+                              maskChanged,
+                              inputPullupMask,
+                              pullupChanged);
 
     default:
       maskChanged = false;
+      pullupChanged = false;
       return false;
   }
 }
