@@ -14,8 +14,8 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ### What Works
 - **8× Analog inputs** — 14-bit ADC, all channels working
-- **7× Digital inputs** — GPT input capture, frequency + duty cycle measurement
-- **8× Digital outputs** — Software PWM via bare-metal AGT1 timer ISR at 10 kHz
+- **8× Digital inputs** — GPT input capture, frequency + duty cycle measurement (overflow-aware)
+- **8× Digital outputs** — Hardware GPT PWM (GPT4/5/6) + GPIO, per-pair frequency configurable at runtime
 - **CAN bus** — TX/RX with configurable IDs, rates, timeout-based safe state
 - **USB CDC serial CLI** — Full command set (STATUS, DIAG, OUT, CONFIG, DEFAULTS, etc.)
 - **EEPROM config** — Persistent settings with CRC validation
@@ -23,10 +23,15 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 - **CAN watchdog** — Outputs go to safe state on RX timeout, bypassed with `serialOverride`
 
 ### Known Issues (Prototype Only — Fixed in Rev 2 Pinout)
-- **DI5 (P107/GPT0A)**: Intermittent capture — parked for investigation later
-- **DPO7/DPO8 (P300/P108)**: SWD debug pins with no GPT peripheral — stuck on software PWM. Rev 2 moves to P303/P304 (GPT7)
+- **DI5 (P107/GPT0A)**: Intermittent capture — init ordering fix applied (initCaptureInputs runs last), may still need verification on new hardware
+- **DPO7/DPO8 (P300/P108)**: SWD debug pins with no GPT peripheral — GPIO only (no PWM). Rev 2 moves to P303/P304 (GPT7)
 - **Output frequency pairs**: GPT4-7 A/B share frequency — 4 independent freq groups, not 8. Acceptable trade-off for hardware PWM resolution
-- **Software PWM resolution**: At 10 kHz tick, max output freq is 5 kHz at 50% only. Hardware PWM (Rev 2) solves this completely
+
+### Fixed Bugs (March 2026)
+- **DI1/DI6/DI7/DI8 reported 1659 Hz for a 300 Hz signal** — GPT2/GPT3 are 16-bit timers (overflow at 65 535 counts). At 24 MHz a 300 Hz period = 80 000 counts, which wraps once; the residual 14 464 counts gave 24 MHz/14 464 ≈ 1659 Hz. Fix: added a per-timer overflow counter incremented on `TIMER_EVENT_CYCLE_END` and used in the period calculation.
+- **Output frequency locked at 300 Hz** — `initHardwarePwm()` always used the default 300 Hz constant and `applyOutputs()` never changed the timer period. Fix: `initHardwarePwm()` now reads from the loaded `outputFreq[]` values; `applyOutputs()` detects per-pair frequency changes and calls `reinitOutputTimer()`.
+- **DI5 (GPT0A) NVIC slot collision** — `initCaptureInputs()` ran before `CAN.begin()`, which called IRQManager and could overwrite the IELSR slot allocated for GPT0 capture-A. Fix: `initCaptureInputs()` now runs last in `setup()`, after CAN and NeoPixel initialisation.
+- **Serial welcome message lost on boot** — USB CDC `Serial.begin()` returns immediately; output sent before the host opens the port is discarded. Fix: welcome banner is deferred and sent in `loop()` on first `Serial` connect.
 
 ---
 
