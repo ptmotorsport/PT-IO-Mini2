@@ -70,7 +70,7 @@ const uint16_t DEFAULT_TX_BASE_ID = 0x700;
 const uint16_t DEFAULT_RX_BASE_ID = 0x640;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
-const uint8_t FW_VERSION = 0x01;
+const uint8_t FW_VERSION = 0x03;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
