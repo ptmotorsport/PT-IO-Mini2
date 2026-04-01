@@ -72,6 +72,11 @@ const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t FW_VERSION = 0x01;
 
+// Additional hardware polarity stage (e.g. external MOSFET inverter).
+// Bit=1 means invert the post-activeMask duty before writing to the pin.
+// Set to 0xFF to invert all outputs, or set bits per-channel as needed.
+const uint8_t OUTPUT_STAGE_INVERT_MASK = 0xFF;
+
 // NeoPixel
 const uint8_t BRIGHTNESS = 26; // 10% of 255
 
@@ -433,15 +438,20 @@ static void captureCallback(timer_callback_args_t *p_args) {
   }
   if (idx >= NUM_DIGITAL_IN) return;
 
-  bool level = readDigitalIn(idx);
+  // Sample overflow counter around captured count read so we don't mis-attribute
+  // an overflow that lands between the two reads.
+  uint32_t ovf1 = ctx->overflowCount;
   uint32_t captured = p_args->capture;
+  uint32_t ovf2 = ctx->overflowCount;
+  uint32_t nowOv = (ovf2 != ovf1 && captured < (ctx->maxCounts >> 1U)) ? ovf2 : ovf1;
+
+  bool level = readDigitalIn(idx);
 
   diCapSeq[idx]++;
 
   if (level) {
     // Rising edge: compute period from previous rising edge using overflow count
     if (diHasFirstRise[idx]) {
-      uint32_t nowOv   = ctx->overflowCount;
       uint32_t prevOv  = diLastRiseOverflow[idx];
       uint32_t prevCap = diLastRise[idx];
       uint32_t ovSpan  = nowOv - prevOv;  // wraps correctly for uint32_t
@@ -467,11 +477,26 @@ static void captureCallback(timer_callback_args_t *p_args) {
     }
     diHasFirstRise[idx]     = true;
     diLastRise[idx]         = captured;
-    diLastRiseOverflow[idx] = ctx->overflowCount;
+    diLastRiseOverflow[idx] = nowOv;
   } else {
     if (diHasFirstRise[idx]) {
-      diHighCounts[idx] = diffCounts(captured, diLastRise[idx], ctx->maxCounts);
-      diHasHigh[idx] = true;
+      uint32_t prevOv  = diLastRiseOverflow[idx];
+      uint32_t prevCap = diLastRise[idx];
+      uint32_t ovSpan  = nowOv - prevOv;  // wraps correctly for uint32_t
+
+      uint32_t highCounts;
+      if (ovSpan == 0) {
+        highCounts = (captured >= prevCap) ? (captured - prevCap)
+                                           : diffCounts(captured, prevCap, ctx->maxCounts);
+      } else {
+        uint64_t total = (uint64_t)(ctx->maxCounts - prevCap + 1U)
+                       + (uint64_t)(ovSpan - 1U) * ((uint64_t)ctx->maxCounts + 1U)
+                       + (uint64_t)captured;
+        highCounts = (total > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)total;
+      }
+
+      diHighCounts[idx] = highCounts;
+      diHasHigh[idx] = (highCounts > 0U);
     }
   }
 }
@@ -506,6 +531,15 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   }
   bool irqA = timer.setup_capture_a_irq(12, nullptr);
   bool irqB = timer.setup_capture_b_irq(12, nullptr);
+  // GPT2/GPT3 are 16-bit and need cycle-end IRQs to count overflows for
+  // low-frequency capture periods.
+  bool irqOvf = false;
+  if (gptChannel == 2U || gptChannel == 3U) {
+    irqOvf = timer.setup_overflow_irq(12, nullptr);
+  }
+  (void)irqA;
+  (void)irqB;
+  (void)irqOvf;
   timer.open();
   timer.start();
 
@@ -569,6 +603,8 @@ static void applyOutputs(bool useSafeState) {
     }
     bool activeHigh = (config.activeMask >> i) & 0x01;
     if (!activeHigh) duty = 255 - duty;
+    bool stageInverted = ((OUTPUT_STAGE_INVERT_MASK >> i) & 0x01U) != 0U;
+    if (stageInverted) duty = 255 - duty;
     newDuty[i] = duty;
   }
 
@@ -1792,4 +1828,3 @@ void loop() {
     updateStatusLed(now);
   }
 }
-
