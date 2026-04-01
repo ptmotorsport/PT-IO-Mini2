@@ -72,6 +72,11 @@ const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t FW_VERSION = 0x01;
 
+// Additional hardware polarity stage (e.g. external MOSFET inverter).
+// Bit=1 means invert the post-activeMask duty before writing to the pin.
+// Set to 0xFF to invert all outputs, or set bits per-channel as needed.
+const uint8_t OUTPUT_STAGE_INVERT_MASK = 0xFF;
+
 // NeoPixel
 const uint8_t BRIGHTNESS = 26; // 10% of 255
 
@@ -115,7 +120,9 @@ uint8_t lastAppliedGpioLevel[2] = {0xFFU, 0xFFU};
 uint32_t diTimerFreq[NUM_DIGITAL_IN];
 
 // Input capture stats
-volatile uint32_t diLastRise[NUM_DIGITAL_IN];
+volatile uint32_t diLastRise[NUM_DIGITAL_IN];       // timer count at last rising edge (0 = no rise yet)
+volatile uint32_t diLastRiseOverflow[NUM_DIGITAL_IN]; // per-channel overflow count at last rising edge
+volatile bool     diHasFirstRise[NUM_DIGITAL_IN];   // true once first rising edge has been seen
 volatile uint32_t diPeriodCounts[NUM_DIGITAL_IN];
 volatile uint32_t diHighCounts[NUM_DIGITAL_IN];
 volatile bool diHasPeriod[NUM_DIGITAL_IN];
@@ -126,6 +133,9 @@ volatile uint32_t diCapSeq[NUM_DIGITAL_IN];  // incremented on each capture even
 uint32_t diCapSeqLast[NUM_DIGITAL_IN];
 uint32_t diCapTsLast[NUM_DIGITAL_IN];
 const uint32_t DI_STALE_TIMEOUT_MS = 500;
+
+// Serial connection tracking
+bool serialWelcomeSent = false;
 
 // Runtime status
 uint32_t lastCanRxMs = 0;
@@ -155,12 +165,16 @@ FspTimer gpt6_out;  // DPO3-4  (GTIOC6A/6B)
 uint32_t gpt4PeriodCounts = 0;
 uint32_t gpt5PeriodCounts = 0;
 uint32_t gpt6PeriodCounts = 0;
+// Last applied output frequency per GPT pair (0=GPT5/DPO1-2, 1=GPT6/DPO3-4, 2=GPT4/DPO5-6)
+// Initialised to 0 so any non-zero loaded frequency triggers an update on first applyOutputs()
+uint16_t lastAppliedOutputFreqHz[3] = {0, 0, 0};
 
 struct CaptureCtx {
   uint8_t idxA;
   uint8_t idxB;
   uint32_t maxCounts;
   uint32_t timerFreqHz;
+  volatile uint32_t overflowCount;  // incremented by TIMER_EVENT_CYCLE_END in captureCallback
 };
 
 CaptureCtx gpt0Ctx;
@@ -408,6 +422,14 @@ static void captureCallback(timer_callback_args_t *p_args) {
   CaptureCtx *ctx = static_cast<CaptureCtx *>(const_cast<void *>(p_args->p_context));
   if (!ctx) return;
 
+  // Count timer overflows so that periods spanning multiple wrap-arounds are
+  // measured correctly.  GPT2/GPT3 are 16-bit timers: at 24 MHz they overflow
+  // every ~2.73 ms, which is shorter than one period of a 300 Hz signal.
+  if (p_args->event == TIMER_EVENT_CYCLE_END) {
+    ctx->overflowCount++;
+    return;
+  }
+
   uint8_t idx = 0xFF;
   if (p_args->event == TIMER_EVENT_CAPTURE_A) {
     idx = ctx->idxA;
@@ -416,21 +438,65 @@ static void captureCallback(timer_callback_args_t *p_args) {
   }
   if (idx >= NUM_DIGITAL_IN) return;
 
-  bool level = readDigitalIn(idx);
+  // Sample overflow counter around captured count read so we don't mis-attribute
+  // an overflow that lands between the two reads.
+  uint32_t ovf1 = ctx->overflowCount;
   uint32_t captured = p_args->capture;
+  uint32_t ovf2 = ctx->overflowCount;
+  uint32_t nowOv = (ovf2 != ovf1 && captured < (ctx->maxCounts >> 1U)) ? ovf2 : ovf1;
+
+  bool level = readDigitalIn(idx);
 
   diCapSeq[idx]++;
 
   if (level) {
-    if (diLastRise[idx] != 0) {
-      diPeriodCounts[idx] = diffCounts(captured, diLastRise[idx], ctx->maxCounts);
-      diHasPeriod[idx] = (diPeriodCounts[idx] > 0);
+    // Rising edge: compute period from previous rising edge using overflow count
+    if (diHasFirstRise[idx]) {
+      uint32_t prevOv  = diLastRiseOverflow[idx];
+      uint32_t prevCap = diLastRise[idx];
+      uint32_t ovSpan  = nowOv - prevOv;  // wraps correctly for uint32_t
+
+      uint32_t period;
+      if (ovSpan == 0) {
+        period = (captured >= prevCap) ? (captured - prevCap)
+                                       : diffCounts(captured, prevCap, ctx->maxCounts);
+      } else {
+        // Period spans ovSpan full overflow cycles (ovSpan >= 1 here) plus
+        // the fractional parts before/after the first/last overflow boundary:
+        //   (maxCounts - prevCap + 1)  counts to the end of the first overflow cycle
+        //   (ovSpan - 1) * (maxCounts + 1)  counts for any complete middle cycles
+        //   captured                    counts into the current (final) cycle
+        uint64_t total = (uint64_t)(ctx->maxCounts - prevCap + 1U)
+                       + (uint64_t)(ovSpan - 1U) * ((uint64_t)ctx->maxCounts + 1U)
+                       + (uint64_t)captured;
+        period = (total > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)total;
+      }
+
+      diPeriodCounts[idx] = period;
+      diHasPeriod[idx]    = (period > 0);
     }
-    diLastRise[idx] = captured;
+    diHasFirstRise[idx]     = true;
+    diLastRise[idx]         = captured;
+    diLastRiseOverflow[idx] = nowOv;
   } else {
-    if (diLastRise[idx] != 0) {
-      diHighCounts[idx] = diffCounts(captured, diLastRise[idx], ctx->maxCounts);
-      diHasHigh[idx] = true;
+    if (diHasFirstRise[idx]) {
+      uint32_t prevOv  = diLastRiseOverflow[idx];
+      uint32_t prevCap = diLastRise[idx];
+      uint32_t ovSpan  = nowOv - prevOv;  // wraps correctly for uint32_t
+
+      uint32_t highCounts;
+      if (ovSpan == 0) {
+        highCounts = (captured >= prevCap) ? (captured - prevCap)
+                                           : diffCounts(captured, prevCap, ctx->maxCounts);
+      } else {
+        uint64_t total = (uint64_t)(ctx->maxCounts - prevCap + 1U)
+                       + (uint64_t)(ovSpan - 1U) * ((uint64_t)ctx->maxCounts + 1U)
+                       + (uint64_t)captured;
+        highCounts = (total > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)total;
+      }
+
+      diHighCounts[idx] = highCounts;
+      diHasHigh[idx] = (highCounts > 0U);
     }
   }
 }
@@ -441,6 +507,7 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   ctx.idxB = idxB;
   ctx.maxCounts = 0xFFFFFFFF;
   ctx.timerFreqHz = 0;
+  ctx.overflowCount = 0;
 
   // Arduino variant marks GPT0-3 as TIMER_PWM for default PWM pins.
   // force_use_of_pwm_reserved_timer() allows begin() to claim these channels
@@ -464,6 +531,15 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   }
   bool irqA = timer.setup_capture_a_irq(12, nullptr);
   bool irqB = timer.setup_capture_b_irq(12, nullptr);
+  // GPT2/GPT3 are 16-bit and need cycle-end IRQs to count overflows for
+  // low-frequency capture periods.
+  bool irqOvf = false;
+  if (gptChannel == 2U || gptChannel == 3U) {
+    irqOvf = timer.setup_overflow_irq(12, nullptr);
+  }
+  (void)irqA;
+  (void)irqB;
+  (void)irqOvf;
   timer.open();
   timer.start();
 
@@ -491,6 +567,30 @@ static bool setCanBitrate(uint16_t kbps) {
 
 // swPwmIsr removed - using hardware PWM instead
 
+// Re-initialise a single output GPT timer at a new frequency, then invalidate
+// the cached duty-cycle counts so that applyOutputs() re-applies the duty.
+static void reinitOutputTimer(FspTimer &timer, uint8_t gptChannel,
+                              uint32_t &periodCounts,
+                              uint32_t &cachedCounts0, uint32_t &cachedCounts1) {
+  timer.end();
+  FspTimer::force_use_of_pwm_reserved_timer();
+  // Reload from the matching outputFreq[] slot (caller responsible for selecting correct Hz).
+  // We pass 50.0f initial duty just to open the timer; actual duty is applied below.
+  uint16_t hz = outputFreq[(gptChannel == 5) ? 0 : (gptChannel == 6) ? 2 : 4];
+  timer.begin(TIMER_MODE_PWM, GPT_TIMER, gptChannel, hz, 50.0f);
+  timer.add_pwm_extended_cfg();
+  timer.enable_pwm_channel(CHANNEL_B);
+  timer.enable_pwm_channel(CHANNEL_A);
+  timer.open();
+  timer.set_duty_cycle(0, CHANNEL_B);
+  timer.set_duty_cycle(0, CHANNEL_A);
+  timer.start();
+  periodCounts  = timer.get_period_raw();
+  // Invalidate cached counts so the duty section below re-applies them.
+  cachedCounts0 = 0xFFFFFFFFUL;
+  cachedCounts1 = 0xFFFFFFFFUL;
+}
+
 // Apply output values using hardware PWM (GPT4, GPT5, GPT6) and GPIO
 static void applyOutputs(bool useSafeState) {
   uint8_t newDuty[NUM_DIGITAL_OUT];
@@ -503,7 +603,38 @@ static void applyOutputs(bool useSafeState) {
     }
     bool activeHigh = (config.activeMask >> i) & 0x01;
     if (!activeHigh) duty = 255 - duty;
+    bool stageInverted = ((OUTPUT_STAGE_INVERT_MASK >> i) & 0x01U) != 0U;
+    if (stageInverted) duty = 255 - duty;
     newDuty[i] = duty;
+  }
+
+  // Update hardware PWM frequency per GPT pair when it has changed.
+  // Each GPT timer drives two outputs that share the same period register.
+  // Use the even-indexed channel of each pair as the authoritative frequency.
+  //   GPT5 → DPO1-2 (outputFreq[0]), GPT6 → DPO3-4 (outputFreq[2]), GPT4 → DPO5-6 (outputFreq[4])
+  if (gpt5_out.is_opened() && outputFreq[0] != lastAppliedOutputFreqHz[0]) {
+    if (rxDebug) {
+      Serial.print("[FREQ GPT5 "); Serial.print(lastAppliedOutputFreqHz[0]);
+      Serial.print("->"); Serial.print(outputFreq[0]); Serial.println("Hz]");
+    }
+    reinitOutputTimer(gpt5_out, 5, gpt5PeriodCounts, lastAppliedPwmCounts[0], lastAppliedPwmCounts[1]);
+    lastAppliedOutputFreqHz[0] = outputFreq[0];
+  }
+  if (gpt6_out.is_opened() && outputFreq[2] != lastAppliedOutputFreqHz[1]) {
+    if (rxDebug) {
+      Serial.print("[FREQ GPT6 "); Serial.print(lastAppliedOutputFreqHz[1]);
+      Serial.print("->"); Serial.print(outputFreq[2]); Serial.println("Hz]");
+    }
+    reinitOutputTimer(gpt6_out, 6, gpt6PeriodCounts, lastAppliedPwmCounts[2], lastAppliedPwmCounts[3]);
+    lastAppliedOutputFreqHz[1] = outputFreq[2];
+  }
+  if (gpt4_out.is_opened() && outputFreq[4] != lastAppliedOutputFreqHz[2]) {
+    if (rxDebug) {
+      Serial.print("[FREQ GPT4 "); Serial.print(lastAppliedOutputFreqHz[2]);
+      Serial.print("->"); Serial.print(outputFreq[4]); Serial.println("Hz]");
+    }
+    reinitOutputTimer(gpt4_out, 4, gpt4PeriodCounts, lastAppliedPwmCounts[4], lastAppliedPwmCounts[5]);
+    lastAppliedOutputFreqHz[2] = outputFreq[4];
   }
 
   // Update hardware PWM using set_duty_cycle
@@ -957,23 +1088,31 @@ static void printHelp() {
 
 static void printStatusOnce() {
   Serial.println("\n========== STATUS ==========");
-  Serial.print("ADC Resolution: ");
-  Serial.print(ADC_RESOLUTION);
-  Serial.print("-bit (0-");
-  Serial.print(ADC_MAX);
+  Serial.print("CAN Mode: ");
+  Serial.print(config.canMode);
+  Serial.print(" (");
+  Serial.print(canModeName(config.canMode));
   Serial.println(")");
   Serial.print("CAN: ");
   Serial.print(config.canSpeedKbps);
-  Serial.print(" kbps, TX Base=0x");
+  Serial.print(" kbps  TX Base=0x");
   Serial.print(config.txBaseId, HEX);
-  Serial.print(", RX Base=0x");
+  Serial.print("  RX Base=0x");
   Serial.print(config.rxBaseId, HEX);
-  Serial.print(", TX Rate=");
+  Serial.print("  TX Rate=");
   Serial.print(config.txRateHz);
   Serial.println(" Hz");
   Serial.print("RX Timeout: ");
   Serial.print(config.rxTimeoutMs);
-  Serial.println(" ms");
+  Serial.print(" ms  SafeState=");
+  Serial.print(outputsInSafeState ? "YES" : "NO");
+  Serial.print("  SerialOverride=");
+  Serial.println(serialOverride ? "ON" : "OFF");
+  Serial.print("ADC: ");
+  Serial.print(ADC_RESOLUTION);
+  Serial.print("-bit (0-");
+  Serial.print(ADC_MAX);
+  Serial.println(")");
   Serial.println();
 
   Serial.println("--- Analog Inputs ---");
@@ -1017,13 +1156,13 @@ static void printStatusOnce() {
     Serial.print(" (");
     Serial.print(DIGITAL_IN_PORT_NAMES[i]);
     Serial.print("): ");
-    Serial.print(state ? "HIGH" : "LOW");
+    Serial.print(state ? "HIGH" : "LOW ");
     Serial.print(" | ");
 
     if (hasP && period > 0 && timerFreq > 0) {
       float freq = static_cast<float>(timerFreq) / static_cast<float>(period);
-      Serial.print(freq, 2);
-      Serial.print(" Hz, duty=");
+      Serial.print(freq, 1);
+      Serial.print(" Hz  duty=");
       if (hasH) {
         float duty = (static_cast<float>(high) / static_cast<float>(period)) * 100.0f;
         Serial.print(duty, 1);
@@ -1032,7 +1171,7 @@ static void printStatusOnce() {
         Serial.print("--");
       }
     } else {
-      Serial.print("-- Hz, duty=--");
+      Serial.print("-- Hz  duty=--");
     }
     Serial.print(" [cap=");
     Serial.print(diCapSeq[i]);
@@ -1042,35 +1181,39 @@ static void printStatusOnce() {
 
   Serial.println();
   Serial.println("--- Digital Outputs (Hardware PWM) ---");
-  Serial.print("SafeState=");
-  Serial.print(outputsInSafeState ? "YES" : "NO");
-  Serial.print("  lastCanRxMs=");
+  Serial.print("HW_PWM=");
+  Serial.print((gpt4_out.is_opened() && gpt5_out.is_opened() && gpt6_out.is_opened()) ? "OK" : "ERR");
+  Serial.print("  lastRxMs=");
   Serial.print(lastCanRxMs);
   Serial.print("  now=");
   Serial.print(millis());
   Serial.print("  timeout=");
-  Serial.print(config.rxTimeoutMs);
-  Serial.print("  HW_PWM=");
-  Serial.println((gpt4_out.is_opened() && gpt5_out.is_opened() && gpt6_out.is_opened()) ? "OK" : "ERR");
+  Serial.println(config.rxTimeoutMs);
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
-    bool state = readDigitalOut(i);
-    uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
-    uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
-    uint32_t pfs = R_PFS->PORT[port].PIN[pin].PmnPFS;
+    bool pinState  = readDigitalOut(i);
+    bool safeOn    = (config.safeMask   >> i) & 0x01;
+    bool activeHigh= (config.activeMask >> i) & 0x01;
     Serial.print("DPO");
     Serial.print(i + 1);
     Serial.print(" (");
     Serial.print(DIGITAL_OUT_PORT_NAMES[i]);
-    Serial.print("): ");
-    Serial.print(state ? "ON" : "OFF");
-    Serial.print(" | duty=");
+    Serial.print("): pin=");
+    Serial.print(pinState ? "H" : "L");
+    Serial.print("  duty=");
     Serial.print(outputDuty[i]);
-    Serial.print("/255, freq=");
+    Serial.print("/255  freq=");
     Serial.print(outputFreq[i]);
-    Serial.print(" Hz, type=");
-    if (i < 6) {
-      Serial.print("GPT");
-      Serial.print((i < 2) ? "5" : (i < 4) ? "6" : "4");
+    Serial.print(" Hz  active=");
+    Serial.print(activeHigh ? "HIGH" : "LOW ");
+    Serial.print("  safe=");
+    Serial.print(safeOn ? "ON " : "OFF");
+    Serial.print("  drv=");
+    if (i < 2) {
+      Serial.print("GPT5");
+    } else if (i < 4) {
+      Serial.print("GPT6");
+    } else if (i < 6) {
+      Serial.print("GPT4");
     } else {
       Serial.print("GPIO");
     }
@@ -1313,13 +1456,22 @@ static void handleSerial() {
       Serial.println("ERR: OUTFREQ <ch 1-8> <hz>");
       return;
     }
-    // Persist as pair frequency (pairs share EEPROM slot)
+    // Persist as pair frequency (pairs share EEPROM slot and a single GPT timer).
+    // Update both channels of the pair so applyOutputs() picks up the change
+    // regardless of which channel in the pair was specified.
     uint8_t pair = (ch - 1) / 2;
     config.outFreqHz[pair] = hz;
     saveConfig();
-    outputFreq[ch - 1] = hz;
+    outputFreq[pair * 2]     = hz;
+    outputFreq[pair * 2 + 1] = hz;
     applyOutputs(outputsInSafeState);
-    Serial.println("OK");
+    Serial.print("OK: DPO");
+    Serial.print(pair * 2 + 1);
+    Serial.print("-");
+    Serial.print(pair * 2 + 2);
+    Serial.print(" freq=");
+    Serial.print(hz);
+    Serial.println(" Hz");
     return;
   }
 
@@ -1436,13 +1588,18 @@ static void initHardwarePwm() {
   configureGpioOutput(DIGITAL_OUT_PINS[6], false);  // DPO7 - GPIO only
   configureGpioOutput(DIGITAL_OUT_PINS[7], false);  // DPO8 - GPIO only
 
-  uint32_t pwmFreq = DEFAULT_PWM_FREQ_HZ;
+  // Use per-pair frequencies already loaded from config into outputFreq[].
+  // Pairs: DPO1-2 → outputFreq[0] (GPT5), DPO3-4 → outputFreq[2] (GPT6),
+  //        DPO5-6 → outputFreq[4] (GPT4).
+  uint32_t freqGpt5 = outputFreq[0];
+  uint32_t freqGpt6 = outputFreq[2];
+  uint32_t freqGpt4 = outputFreq[4];
   
   // GPT5: Channels 0-1 (DPO1-2, P408-P409)
   configureGptPeripheral(DIGITAL_OUT_PINS[0]);  // P408 - DPO1
   configureGptPeripheral(DIGITAL_OUT_PINS[1]);  // P409 - DPO2
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt5_out.begin(TIMER_MODE_PWM, GPT_TIMER, 5, pwmFreq, 50.0f);
+  gpt5_out.begin(TIMER_MODE_PWM, GPT_TIMER, 5, freqGpt5, 50.0f);
   gpt5_out.add_pwm_extended_cfg();
   gpt5_out.enable_pwm_channel(CHANNEL_B);  // DPO1 on GTIOC5B
   gpt5_out.enable_pwm_channel(CHANNEL_A);  // DPO2 on GTIOC5A
@@ -1451,12 +1608,13 @@ static void initHardwarePwm() {
   gpt5_out.set_duty_cycle(0, CHANNEL_A);
   gpt5_out.start();
   gpt5PeriodCounts = gpt5_out.get_period_raw();
+  lastAppliedOutputFreqHz[0] = static_cast<uint16_t>(freqGpt5);
 
   // GPT6: Channels 2-3 (DPO3-4, P410-P411)
   configureGptPeripheral(DIGITAL_OUT_PINS[2]);  // P410 - DPO3
   configureGptPeripheral(DIGITAL_OUT_PINS[3]);  // P411 - DPO4
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt6_out.begin(TIMER_MODE_PWM, GPT_TIMER, 6, pwmFreq, 50.0f);
+  gpt6_out.begin(TIMER_MODE_PWM, GPT_TIMER, 6, freqGpt6, 50.0f);
   gpt6_out.add_pwm_extended_cfg();
   gpt6_out.enable_pwm_channel(CHANNEL_B);  // DPO3 on GTIOC6B
   gpt6_out.enable_pwm_channel(CHANNEL_A);  // DPO4 on GTIOC6A
@@ -1465,12 +1623,13 @@ static void initHardwarePwm() {
   gpt6_out.set_duty_cycle(0, CHANNEL_A);
   gpt6_out.start();
   gpt6PeriodCounts = gpt6_out.get_period_raw();
+  lastAppliedOutputFreqHz[1] = static_cast<uint16_t>(freqGpt6);
 
   // GPT4: Channels 4-5 (DPO5-6, P302-P301)
   configureGptPeripheral(DIGITAL_OUT_PINS[4]);  // P302 - DPO5
   configureGptPeripheral(DIGITAL_OUT_PINS[5]);  // P301 - DPO6
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, pwmFreq, 50.0f);
+  gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, freqGpt4, 50.0f);
   gpt4_out.add_pwm_extended_cfg();
   gpt4_out.enable_pwm_channel(CHANNEL_A);  // DPO5 on GTIOC4A
   gpt4_out.enable_pwm_channel(CHANNEL_B);  // DPO6 on GTIOC4B
@@ -1479,10 +1638,15 @@ static void initHardwarePwm() {
   gpt4_out.set_duty_cycle(0, CHANNEL_B);
   gpt4_out.start();
   gpt4PeriodCounts = gpt4_out.get_period_raw();
+  lastAppliedOutputFreqHz[2] = static_cast<uint16_t>(freqGpt4);
 
-  Serial.print("[HW PWM] GPT4/5/6 initialized at ");
-  Serial.print(pwmFreq);
-  Serial.println(" Hz");
+  Serial.print("[HW PWM] GPT5=");
+  Serial.print(freqGpt5);
+  Serial.print("Hz GPT6=");
+  Serial.print(freqGpt6);
+  Serial.print("Hz GPT4=");
+  Serial.print(freqGpt4);
+  Serial.println("Hz");
 }
 
 static void initCaptureInputs() {
@@ -1494,18 +1658,21 @@ static void initCaptureInputs() {
   initCaptureTimer(gpt2, gpt2Ctx, 2, 5, 0); // GPT2: A=DI6, B=DI1
   initCaptureTimer(gpt3, gpt3Ctx, 3, 7, 6); // GPT3: A=DI8, B=DI7
 
-  // Force-enable NVIC for all capture IRQs.
+  // Force-enable NVIC for all capture IRQs and cycle-end IRQs.
   // IRQManager::addTimerCompareCaptureA/B allocates the IELSR slot and ISR
   // vector but does NOT call NVIC_EnableIRQ.  R_GPT_Open is supposed to
   // enable them via r_gpt_enable_irq, but GPT0 capture-A (the very first
   // slot) ends up with NVIC disabled in practice.  Explicitly enabling
-  // all capture IRQs here is a safe no-op for already-enabled ones and
-  // fixes the GPT0-A case.
+  // all capture and cycle-end IRQs here is a safe no-op for already-enabled
+  // ones and fixes the GPT0-A case.
   FspTimer *capTimers[] = {&gpt0, &gpt1, &gpt2, &gpt3};
   for (auto *t : capTimers) {
     auto *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t->get_cfg()->p_extend));
     if (ext->capture_a_irq >= 0) NVIC_EnableIRQ((IRQn_Type)ext->capture_a_irq);
     if (ext->capture_b_irq >= 0) NVIC_EnableIRQ((IRQn_Type)ext->capture_b_irq);
+    // Also enable the cycle-end (overflow) IRQ so captureCallback receives
+    // TIMER_EVENT_CYCLE_END for multi-overflow period measurement.
+    if (t->get_cfg()->cycle_end_irq >= 0) NVIC_EnableIRQ((IRQn_Type)t->get_cfg()->cycle_end_irq);
   }
 }
 
@@ -1519,15 +1686,17 @@ void setup() {
   initAdc();
 
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    diLastRise[i] = 0;
-    diPeriodCounts[i] = 0;
-    diHighCounts[i] = 0;
-    diHasPeriod[i] = false;
-    diHasHigh[i] = false;
-    diTimerFreq[i] = 0;
-    diCapSeq[i] = 0;
-    diCapSeqLast[i] = 0;
-    diCapTsLast[i] = 0;
+    diLastRise[i]         = 0;
+    diLastRiseOverflow[i] = 0;
+    diHasFirstRise[i]     = false;
+    diPeriodCounts[i]     = 0;
+    diHighCounts[i]       = 0;
+    diHasPeriod[i]        = false;
+    diHasHigh[i]          = false;
+    diTimerFreq[i]        = 0;
+    diCapSeq[i]           = 0;
+    diCapSeqLast[i]       = 0;
+    diCapTsLast[i]        = 0;
   }
 
   // Initialize output state arrays
@@ -1542,31 +1711,54 @@ void setup() {
   }
 
   initHardwarePwm();
-  initCaptureInputs();
 
   // Initialize NeoPixel
   neopixel.begin();
   neopixel.setBrightness(BRIGHTNESS);
   neopixel.show();
 
-  // Initialize CAN
+  // Initialize CAN before capture inputs so that CAN.begin()'s IRQManager
+  // allocations don't overwrite IELSR slots that the GPT capture timers need.
   if (!setCanBitrate(config.canSpeedKbps)) {
-    Serial.println("CAN init FAILED");
+    Serial.println("[CAN] init FAILED");
   } else {
-    Serial.println("CAN init OK");
+    Serial.println("[CAN] init OK");
   }
 
-  Serial.println("====================================");
-  Serial.println("   PT-IO-Mini2-1 CAN IO Expander");
-  Serial.println("====================================");
-  printHelp();
+  // Capture inputs are initialized last so their IELSR slots are not
+  // overwritten by subsequent IRQManager allocations (CAN, NeoPixel, etc.).
+  initCaptureInputs();
 
   applyOutputs(true);
   outputsInSafeState = true;
+
+  // Welcome banner is deferred to loop() so it is sent after USB CDC
+  // enumerates.  Serial.begin() returns immediately on RA4M1 USB CDC;
+  // the host won't see any output until the port is opened.
 }
 
 void loop() {
   uint32_t now = millis();
+
+  // Print welcome banner the first time the serial port is opened.
+  // On RA4M1 USB CDC, Serial.begin() completes immediately but the host
+  // won't receive data until the port is opened by a terminal application.
+  if (!serialWelcomeSent && Serial) {
+    serialWelcomeSent = true;
+    Serial.println();
+    Serial.println("============================================");
+    Serial.println("      PT-IO-Mini2  CAN I/O Expander");
+    Serial.print  ("      FW v");
+    Serial.print  (FW_VERSION, HEX);
+    Serial.print  ("  CAN Mode: ");
+    Serial.print  (config.canMode);
+    Serial.print  (" (");
+    Serial.print  (canModeName(config.canMode));
+    Serial.println(")");
+    Serial.println("============================================");
+    Serial.println("Type HELP for available commands.");
+    Serial.println();
+  }
 
   handleSerial();
   processCan();
@@ -1607,11 +1799,13 @@ void loop() {
       diCapTsLast[i] = now;
     } else if (diHasPeriod[i] && (now - diCapTsLast[i] > DI_STALE_TIMEOUT_MS)) {
       noInterrupts();
-      diHasPeriod[i] = false;
-      diHasHigh[i] = false;
-      diPeriodCounts[i] = 0;
-      diHighCounts[i] = 0;
-      diLastRise[i] = 0;
+      diHasPeriod[i]        = false;
+      diHasHigh[i]          = false;
+      diPeriodCounts[i]     = 0;
+      diHighCounts[i]       = 0;
+      diLastRise[i]         = 0;
+      diLastRiseOverflow[i] = 0;
+      diHasFirstRise[i]     = false;
       interrupts();
     }
   }
@@ -1634,4 +1828,3 @@ void loop() {
     updateStatusLed(now);
   }
 }
-
