@@ -113,9 +113,10 @@ adc_channel_cfg_t adc_channel_cfg;
 adc_extended_cfg_t adc_ext_cfg;
 bool adc_ready = false;
 
-// Double-buffered ADC results — one buffer is filled by adcService() while
-// the other is read by the main loop.  adcActiveBuf is the index of the
-// buffer that was most recently completed and is safe to read.
+// Double-buffered ADC results.  adcService() writes the inactive buffer on
+// scan completion, then atomically promotes it by updating adcActiveBuf.
+// The active buffer is always complete and safe to read by the main loop;
+// only one buffer is ever written at a time.
 static uint16_t adcBuf[2][8];  // 2 buffers, NUM_ANALOG channels each
 static volatile uint8_t adcActiveBuf = 0;
 static bool adcScanRunning = false;
@@ -359,8 +360,9 @@ static void adcService() {
 }
 
 // Return the last completed ADC scan without blocking.
-// Returns false (zeros) only when the ADC was never successfully opened or
-// has not yet produced its first scan result (a transient at boot only).
+// Returns false when the ADC was not successfully opened (outValues is zeroed).
+// Returns true otherwise and copies the last completed buffer — values are
+// zero until the first scan completes (a brief transient at boot only).
 static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
   if (!adc_ready) {
     for (int i = 0; i < NUM_ANALOG; i++) {
