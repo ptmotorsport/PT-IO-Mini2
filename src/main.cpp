@@ -209,13 +209,13 @@ static bool readDigitalIn(uint8_t index) {
 // accumulates independently of the CAN TX rate.
 static void updateDigitalInDebounce(uint32_t nowMs) {
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    bool raw = readDigitalIn(static_cast<uint8_t>(i));
+    bool raw = readDigitalIn(i);
     if (raw != diRawPrevState[i]) {
       // Raw level changed — restart the stability timer.
       diRawPrevState[i] = raw;
       diRawStableMs[i]  = nowMs;
     } else if (raw != diDebouncedState[i] &&
-               (nowMs - diRawStableMs[i] >= DI_DEBOUNCE_MS)) {
+               (uint32_t)(nowMs - diRawStableMs[i]) >= DI_DEBOUNCE_MS) {
       // Raw level has been stable and different long enough — latch it.
       diDebouncedState[i] = raw;
     }

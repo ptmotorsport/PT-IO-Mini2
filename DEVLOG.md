@@ -32,6 +32,7 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 - **Output frequency locked at 300 Hz** — `initHardwarePwm()` always used the default 300 Hz constant and `applyOutputs()` never changed the timer period. Fix: `initHardwarePwm()` now reads from the loaded `outputFreq[]` values; `applyOutputs()` detects per-pair frequency changes and calls `reinitOutputTimer()`.
 - **DI5 (GPT0A) NVIC slot collision** — `initCaptureInputs()` ran before `CAN.begin()`, which called IRQManager and could overwrite the IELSR slot allocated for GPT0 capture-A. Fix: `initCaptureInputs()` now runs last in `setup()`, after CAN and NeoPixel initialisation.
 - **Serial welcome message lost on boot** — USB CDC `Serial.begin()` returns immediately; output sent before the host opens the port is discarded. Fix: welcome banner is deferred and sent in `loop()` on first `Serial` connect.
+- **Digital input state fluctuates at 0 V** — The `digitalInMask` in CAN TX state frames was built from raw unfiltered GPIO reads (`PIDR`). Electrical noise on a 0 V-held input can cause momentary HIGH readings because `PIDR` is not debounced. Fix: added a 10 ms software debounce (`updateDigitalInDebounce()`). The debounced state (`diDebouncedState[]`) is now used in all CAN TX frames and serial STATUS output instead of raw `readDigitalIn()` calls.
 
 ---
 
