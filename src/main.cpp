@@ -134,6 +134,15 @@ uint32_t diCapSeqLast[NUM_DIGITAL_IN];
 uint32_t diCapTsLast[NUM_DIGITAL_IN];
 const uint32_t DI_STALE_TIMEOUT_MS = 500;
 
+// Software debounce for digital input state
+// Raw GPIO reads (PIDR) are unfiltered; noise on a 0 V-held input can cause
+// momentary HIGH readings.  The debounce requires the raw level to be stable
+// for DI_DEBOUNCE_MS before updating the reported state.
+const uint32_t DI_DEBOUNCE_MS = 10;
+bool     diDebouncedState[NUM_DIGITAL_IN];  // Debounced (reported) state
+bool     diRawPrevState[NUM_DIGITAL_IN];    // Raw level seen on previous debounce poll
+uint32_t diRawStableMs[NUM_DIGITAL_IN];     // Timestamp when current raw run started
+
 // Serial connection tracking
 bool serialWelcomeSent = false;
 
@@ -193,6 +202,24 @@ static bool readDigitalIn(uint8_t index) {
   uint8_t port = DIGITAL_IN_PINS[index] >> 8;
   uint8_t pin = DIGITAL_IN_PINS[index] & 0xFF;
   return R_PFS->PORT[port].PIN[pin].PmnPFS_b.PIDR ? true : false;
+}
+
+// Poll raw GPIO levels and advance the per-channel debounce state machine.
+// Must be called on every loop() iteration so the 10 ms stability window
+// accumulates independently of the CAN TX rate.
+static void updateDigitalInDebounce(uint32_t nowMs) {
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    bool raw = readDigitalIn(static_cast<uint8_t>(i));
+    if (raw != diRawPrevState[i]) {
+      // Raw level changed — restart the stability timer.
+      diRawPrevState[i] = raw;
+      diRawStableMs[i]  = nowMs;
+    } else if (raw != diDebouncedState[i] &&
+               (nowMs - diRawStableMs[i] >= DI_DEBOUNCE_MS)) {
+      // Raw level has been stable and different long enough — latch it.
+      diDebouncedState[i] = raw;
+    }
+  }
 }
 
 static bool readDigitalOut(uint8_t index) {
@@ -866,7 +893,7 @@ static void sendTxFrames() {
 
   uint8_t digitalInMask = 0;
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    if (readDigitalIn(i)) {
+    if (diDebouncedState[i]) {
       digitalInMask |= (1 << i);
     }
   }
@@ -1137,7 +1164,7 @@ static void printStatusOnce() {
   Serial.println();
   Serial.println("--- Digital Inputs ---");
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    bool state = readDigitalIn(i);
+    bool state = diDebouncedState[i];
     uint32_t period;
     uint32_t high;
     bool hasP;
@@ -1697,6 +1724,9 @@ void setup() {
     diCapSeq[i]           = 0;
     diCapSeqLast[i]       = 0;
     diCapTsLast[i]        = 0;
+    diDebouncedState[i]   = false;
+    diRawPrevState[i]     = false;
+    diRawStableMs[i]      = 0;
   }
 
   // Initialize output state arrays
@@ -1768,6 +1798,11 @@ void loop() {
   // to a newer millis(), unsigned subtraction (now - lastCanRxMs) would wrap to
   // ~4 billion and trigger the RX-timeout safe-state every single loop.
   now = millis();
+
+  // Poll raw GPIO levels and advance the per-channel debounce state machine.
+  // This runs every loop iteration so the 10 ms stability window accumulates
+  // continuously, independent of the CAN TX rate.
+  updateDigitalInDebounce(now);
 
   // Deferred config save: EEPROM writes are never issued inside the CAN drain
   // loop.  The pending flag is set by handleCanRx() and flushed here, with a
