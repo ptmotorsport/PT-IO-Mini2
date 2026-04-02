@@ -110,6 +110,13 @@ adc_channel_cfg_t adc_channel_cfg;
 adc_extended_cfg_t adc_ext_cfg;
 bool adc_ready = false;
 
+// Double-buffered ADC results — one buffer is filled by adcService() while
+// the other is read by the main loop.  adcActiveBuf is the index of the
+// buffer that was most recently completed and is safe to read.
+static uint16_t adcBuf[2][8];  // 2 buffers, NUM_ANALOG channels each
+static uint8_t adcActiveBuf = 0;
+static bool adcScanRunning = false;
+
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
 uint16_t outputFreq[NUM_DIGITAL_OUT];
@@ -227,9 +234,16 @@ static void configureGpioOutput(bsp_io_port_pin_t pin, bool level) {
 static void writeGpioOutput(bsp_io_port_pin_t pin, bool level) {
   uint8_t port = pin >> 8;
   uint8_t bit = pin & 0xFF;
-  R_BSP_PinAccessEnable();
-  R_PFS->PORT[port].PIN[bit].PmnPFS_b.PODR = level ? 1 : 0;
-  R_BSP_PinAccessDisable();
+  // Use PCNTR3 for atomic single-write set/clear (no read-modify-write, no
+  // PFS lock/unlock required).  POSR occupies bits 15:0 (set HIGH) and PORR
+  // occupies bits 31:16 (set LOW) — writing a 1 to the relevant bit is a
+  // single 32-bit bus cycle that cannot be interrupted.
+  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + (uintptr_t)port * 0x20u);
+  if (level) {
+    portReg->PCNTR3 = (uint32_t)(1u << bit);            // POSR: drive HIGH
+  } else {
+    portReg->PCNTR3 = (uint32_t)(1u << (16u + bit));    // PORR: drive LOW
+  }
 }
 
 static void configureGptPeripheral(bsp_io_port_pin_t pin) {
@@ -309,6 +323,34 @@ static void initAdc() {
   adc_ready = true;
 }
 
+// Non-blocking ADC service — call once per main-loop iteration.
+// Manages a scan state machine: starts a new scan when idle, reads results
+// when complete, and swaps the active buffer so the main loop always reads
+// the most recently completed conversion.
+static void adcService() {
+  if (!adc_ready) return;
+
+  if (adcScanRunning) {
+    adc_status_t st;
+    R_ADC_StatusGet(&adc_ctrl, &st);
+    if (st.state == ADC_STATE_SCAN_IN_PROGRESS) {
+      return;  // still converting — check again next loop
+    }
+    // Conversion complete: read into the inactive buffer then swap.
+    uint8_t writeBuf = adcActiveBuf ^ 1u;
+    for (int i = 0; i < NUM_ANALOG; i++) {
+      R_ADC_Read(&adc_ctrl, static_cast<adc_channel_t>(ANALOG_CHANNELS[i]), &adcBuf[writeBuf][i]);
+    }
+    adcActiveBuf = writeBuf;  // atomic 8-bit swap visible to main loop
+    adcScanRunning = false;
+  }
+  // Start a new scan (also covers the very first call).
+  adcScanRunning = (R_ADC_ScanStart(&adc_ctrl) == FSP_SUCCESS);
+}
+
+// Return the last completed ADC scan without blocking.
+// Returns false (zeros) only when the ADC was never successfully opened or
+// has not yet produced its first scan result (a transient at boot only).
 static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
   if (!adc_ready) {
     for (int i = 0; i < NUM_ANALOG; i++) {
@@ -316,25 +358,7 @@ static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
     }
     return false;
   }
-
-  if (R_ADC_ScanStart(&adc_ctrl) != FSP_SUCCESS) {
-    for (int i = 0; i < NUM_ANALOG; i++) {
-      outValues[i] = 0;
-    }
-    return false;
-  }
-
-  adc_status_t status;
-  status.state = ADC_STATE_SCAN_IN_PROGRESS;
-  while (status.state == ADC_STATE_SCAN_IN_PROGRESS) {
-    R_ADC_StatusGet(&adc_ctrl, &status);
-  }
-
-  for (int i = 0; i < NUM_ANALOG; i++) {
-    uint16_t value = 0;
-    R_ADC_Read(&adc_ctrl, static_cast<adc_channel_t>(ANALOG_CHANNELS[i]), &value);
-    outValues[i] = value;
-  }
+  memcpy(outValues, adcBuf[adcActiveBuf], NUM_ANALOG * sizeof(uint16_t));
   return true;
 }
 
@@ -1768,6 +1792,10 @@ void loop() {
   // to a newer millis(), unsigned subtraction (now - lastCanRxMs) would wrap to
   // ~4 billion and trigger the RX-timeout safe-state every single loop.
   now = millis();
+
+  // Service the ADC state machine every loop — kicks off new scans and
+  // double-buffers results so readAnalogRawAll() never busy-waits.
+  adcService();
 
   // Deferred config save: EEPROM writes are never issued inside the CAN drain
   // loop.  The pending flag is set by handleCanRx() and flushed here, with a

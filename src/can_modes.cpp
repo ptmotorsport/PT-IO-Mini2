@@ -245,8 +245,18 @@ bool mode0HandleRx(const CanMsg &msg,
   uint8_t dutyB = msg.data[6];
   uint8_t flagsB = msg.data[7];
 
-  outputFreq[outA] = (freqA == 0U) ? defaultPwmFreqHz : freqA;
-  outputFreq[outB] = (freqB == 0U) ? defaultPwmFreqHz : freqB;
+  // Use defaultPwmFreqHz when the sender signals 0 (don't-care), then clamp
+  // to the same 50–10000 Hz range enforced on EEPROM load.  An out-of-range
+  // value from a mis-configured sender must not reach the GPT timer init.
+  if (freqA == 0U) freqA = defaultPwmFreqHz;
+  if (freqB == 0U) freqB = defaultPwmFreqHz;
+  if (freqA <   50U) freqA =   50U;
+  if (freqA > 10000U) freqA = 10000U;
+  if (freqB <   50U) freqB =   50U;
+  if (freqB > 10000U) freqB = 10000U;
+
+  outputFreq[outA] = freqA;
+  outputFreq[outB] = freqB;
   outputDuty[outA] = dutyA;
   outputDuty[outB] = dutyB;
 

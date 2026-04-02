@@ -125,6 +125,28 @@ Only 2 pins change from the prototype. See `PINOUT.md` for full details.
 
 ---
 
+## Performance, Signal Processing & Safety Improvements (April 2026)
+
+### 1. Atomic GPIO Output via PCNTR3
+`writeGpioOutput()` previously wrote to `PFS.PODR` inside `R_BSP_PinAccessEnable()`/`Disable()`. Per hard-won lesson #3 (see above), the correct approach is PCNTR3:
+- **POSR** (bits 15:0) — write a `1` to set a pin HIGH
+- **PORR** (bits 31:16) — write a `1` to set a pin LOW
+
+A single 32-bit register write is inherently atomic (no read-modify-write race) and avoids the overhead of the PRCR write-protect sequence.
+
+### 2. Non-Blocking ADC via Double-Buffering
+`readAnalogRawAll()` previously started an ADC scan and busy-waited in a `while` loop until all 8 channels converted (~100–200 µs at 14-bit). This blocked every caller (CAN TX frames, STATUS print) and added latency jitter.
+
+New design:
+- `adcService()` is called once per main-loop iteration. It manages a two-state machine: start scan → poll for completion → swap double-buffer.
+- `readAnalogRawAll()` now simply `memcpy`s from the last completed buffer — **zero blocking time**.
+- Results are at most one loop iteration stale (<<1 ms), negligible for 10 Hz CAN TX.
+
+### 3. CAN RX PWM Frequency Validation
+`mode0HandleRx()` now clamps received output frequencies to the same 50–10000 Hz range enforced on EEPROM load. An out-of-range value (zero sender, hardware misconfiguration, or malformed frame) can no longer propagate to the GPT timer re-init path and cause undefined PWM behaviour.
+
+---
+
 ## Rev 2 Firmware TODO
 
 ### Priority 1: Replace Software PWM with Hardware GPT PWM
