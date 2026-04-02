@@ -80,6 +80,9 @@ const uint8_t OUTPUT_STAGE_INVERT_MASK = 0xFF;
 // NeoPixel
 const uint8_t BRIGHTNESS = 26; // 10% of 255
 
+// RA4M1 port register bank stride — each port's R_PORT0_Type block is 0x20 bytes apart
+const uintptr_t PORT_REGISTER_STRIDE = 0x20u;
+
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
 const uint8_t CONFIG_VERSION = 2;
@@ -114,8 +117,9 @@ bool adc_ready = false;
 // the other is read by the main loop.  adcActiveBuf is the index of the
 // buffer that was most recently completed and is safe to read.
 static uint16_t adcBuf[2][8];  // 2 buffers, NUM_ANALOG channels each
-static uint8_t adcActiveBuf = 0;
+static volatile uint8_t adcActiveBuf = 0;
 static bool adcScanRunning = false;
+static uint32_t adcScanFailCount = 0;  // cumulative scan-start failures (exposed via DIAG)
 
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
@@ -206,7 +210,7 @@ static bool readDigitalOut(uint8_t index) {
   uint8_t port = DIGITAL_OUT_PINS[index] >> 8;
   uint8_t pin = DIGITAL_OUT_PINS[index] & 0xFF;
   // Read actual pin level via PCNTR2.PIDR (not PFS PODR which may be stale)
-  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + port * 0x20u);
+  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + port * PORT_REGISTER_STRIDE);
   return (portReg->PCNTR2 & (1u << pin)) ? true : false;
 }
 
@@ -238,7 +242,7 @@ static void writeGpioOutput(bsp_io_port_pin_t pin, bool level) {
   // PFS lock/unlock required).  POSR occupies bits 15:0 (set HIGH) and PORR
   // occupies bits 31:16 (set LOW) — writing a 1 to the relevant bit is a
   // single 32-bit bus cycle that cannot be interrupted.
-  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + (uintptr_t)port * 0x20u);
+  R_PORT0_Type *portReg = (R_PORT0_Type *)((uintptr_t)R_PORT0 + (uintptr_t)port * PORT_REGISTER_STRIDE);
   if (level) {
     portReg->PCNTR3 = (uint32_t)(1u << bit);            // POSR: drive HIGH
   } else {
@@ -345,7 +349,13 @@ static void adcService() {
     adcScanRunning = false;
   }
   // Start a new scan (also covers the very first call).
-  adcScanRunning = (R_ADC_ScanStart(&adc_ctrl) == FSP_SUCCESS);
+  if (R_ADC_ScanStart(&adc_ctrl) != FSP_SUCCESS) {
+    if (adcScanFailCount < 0xFFFFFFFFUL) {
+      adcScanFailCount++;
+    }
+  } else {
+    adcScanRunning = true;
+  }
 }
 
 // Return the last completed ADC scan without blocking.
@@ -991,6 +1001,12 @@ static void sendTxFrames() {
 
 static void printDiag() {
   Serial.println("\n========== DIAG ==========");
+
+  // ADC diagnostics
+  Serial.print("--- ADC ---\nadc_ready="); Serial.print(adc_ready ? "YES" : "NO");
+  Serial.print("  scanRunning="); Serial.print(adcScanRunning ? "YES" : "NO");
+  Serial.print("  activeBuf="); Serial.print(adcActiveBuf);
+  Serial.print("  scanFailCount="); Serial.println(adcScanFailCount);
 
   // GPT capture timer diagnostics
   struct { FspTimer *timer; CaptureCtx *ctx; uint8_t ch; const char *label; } timers[] = {
