@@ -326,7 +326,17 @@ static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
 
   adc_status_t status;
   status.state = ADC_STATE_SCAN_IN_PROGRESS;
+  uint32_t adcStartMs = millis();
   while (status.state == ADC_STATE_SCAN_IN_PROGRESS) {
+    if (millis() - adcStartMs > 10UL) {
+      // ADC hardware failed to complete within 10 ms; mark as not ready
+      // so subsequent calls return zeros rather than blocking forever.
+      adc_ready = false;
+      for (int i = 0; i < NUM_ANALOG; i++) {
+        outValues[i] = 0;
+      }
+      return false;
+    }
     R_ADC_StatusGet(&adc_ctrl, &status);
   }
 
@@ -735,7 +745,7 @@ static void applyOutputs(bool useSafeState) {
 
 // Pending config save flag â€” deferred so EEPROM writes never happen inside
 // the CAN drain loop (flash writes can block for ms and stall the SW PWM ISR).
-static bool pendingConfigSave = false;
+static volatile bool pendingConfigSave = false;
 
 static void handleCanRx(const CanMsg &msg) {
   if (serialOverride) {
@@ -823,6 +833,9 @@ static void processCan() {
 }
 
 static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+  if (len > 0 && data == nullptr) {
+    return;
+  }
   // Zero-init the whole struct â€” CanMsg has fields beyond id/data_length/data
   // (e.g. rtr, extended flags) that the RA4M1 CAN controller reads.
   // Without this, those fields are garbage on calls 2-N and the controller
@@ -831,7 +844,9 @@ static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
   memset(&tx, 0, sizeof(tx));
   tx.id = id;
   tx.data_length = len;
-  memcpy(tx.data, data, len);
+  if (len > 0) {
+    memcpy(tx.data, data, len);
+  }
 
   // Bounded retry so burst TX frames are not dropped on a busy mailbox,
   // but without long blocking delays that starve foreground work.
@@ -976,7 +991,13 @@ static void printDiag() {
     {&gpt3, &gpt3Ctx, 3, "GPT3 (DI8-A, DI7-B)"},
   };
   for (auto &t : timers) {
-    gpt_extended_cfg_t *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t.timer->get_cfg()->p_extend));
+    const timer_cfg_t *tmrCfg = t.timer->get_cfg();
+    if (tmrCfg == nullptr || tmrCfg->p_extend == nullptr) {
+      Serial.print(t.label);
+      Serial.println(": cfg unavailable");
+      continue;
+    }
+    gpt_extended_cfg_t *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(tmrCfg->p_extend));
     uint32_t baseAddr = (uint32_t)R_GPT0 + (t.ch * ((uint32_t)R_GPT1 - (uint32_t)R_GPT0));
     R_GPT0_Type *reg = (R_GPT0_Type *)baseAddr;
 
@@ -1398,6 +1419,10 @@ static void handleSerial() {
   if (cmd.startsWith("TXBASE")) {
     String arg = getArg(1);
     uint16_t id = static_cast<uint16_t>(strtol(arg.c_str(), nullptr, 0));
+    if (id > 0x7FFU) {
+      Serial.println("ERR: CAN ID must be 0x000-0x7FF (11-bit)");
+      return;
+    }
     config.txBaseId = id;
     saveConfig();
     Serial.println("OK");
@@ -1407,6 +1432,10 @@ static void handleSerial() {
   if (cmd.startsWith("RXBASE")) {
     String arg = getArg(1);
     uint16_t id = static_cast<uint16_t>(strtol(arg.c_str(), nullptr, 0));
+    if (id > 0x7FFU) {
+      Serial.println("ERR: CAN ID must be 0x000-0x7FF (11-bit)");
+      return;
+    }
     config.rxBaseId = id;
     saveConfig();
     Serial.println("OK");
