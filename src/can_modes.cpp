@@ -87,6 +87,33 @@ static uint8_t io12MapRawOutToDuty255(uint8_t rawOut) {
   return clampU8((static_cast<uint32_t>(rawOut) * 255UL + 124UL) / 249UL);
 }
 
+static uint32_t io12DecodePeriodMs20(uint8_t flagsByte, uint8_t periodMid, uint8_t periodLsb) {
+  return (static_cast<uint32_t>(flagsByte & 0x0FU) << 16)
+       | (static_cast<uint32_t>(periodMid) << 8)
+       | static_cast<uint32_t>(periodLsb);
+}
+
+static uint16_t io12PeriodScaledToHz(uint32_t periodScaled) {
+  if (periodScaled == 0U) {
+    return 0U;
+  }
+
+  // IO12 packed period uses 10 microsecond units:
+  // periodScaled = period_us / 10
+  // => Hz = 1,000,000 / period_us = 100,000 / periodScaled
+  uint32_t hz = (100000UL + (periodScaled / 2UL)) / periodScaled;
+  if (hz == 0U) {
+    hz = 1U;
+  }
+  if (hz < 10U) {
+    hz = 10U;
+  }
+  if (hz > 10000U) {
+    hz = 10000U;
+  }
+  return clampU16(hz);
+}
+
 static uint32_t io12PeriodScaledFromCapture(uint32_t timerFreqHz, uint32_t periodCounts, bool hasPeriod) {
   if (!hasPeriod || timerFreqHz == 0U || periodCounts == 0U) {
     return 0U;
@@ -125,36 +152,75 @@ static void io12BuildDpiFrame1(uint32_t txId,
                                uint32_t period0,
                                uint32_t high0,
                                bool hasPeriod0,
+                               uint32_t timerFreq1,
+                               uint32_t period1,
+                               uint32_t high1,
+                               bool hasPeriod1,
                                ModeTxFrame &frame) {
   frame.id = txId;
   frame.len = 8;
   memset(frame.data, 0, sizeof(frame.data));
 
-  uint8_t dutyByte = io12DutyByteFromCapture(period0, high0, hasPeriod0);
-  uint32_t periodScaled = io12PeriodScaledFromCapture(timerFreq0, period0, hasPeriod0);
+  // DPI1 (output A)
+  uint8_t dutyByte0 = io12DutyByteFromCapture(period0, high0, hasPeriod0);
+  uint32_t periodScaled0 = io12PeriodScaledFromCapture(timerFreq0, period0, hasPeriod0);
   bool dpi1State = io12DpiStateFromMask(digitalInMask, channelStart);
+
+  frame.data[0] = dutyByte0;
+  frame.data[1] |= static_cast<uint8_t>((dpi1State ? 1U : 0U) << 5);
+  frame.data[1] |= static_cast<uint8_t>((periodScaled0 >> 16) & 0x0FU);
+  frame.data[2] = static_cast<uint8_t>((periodScaled0 >> 8) & 0xFFU);
+  frame.data[3] = static_cast<uint8_t>(periodScaled0 & 0xFFU);
+
+  // DPI2 (output B)
+  uint8_t dutyByte1 = io12DutyByteFromCapture(period1, high1, hasPeriod1);
+  uint32_t periodScaled1 = io12PeriodScaledFromCapture(timerFreq1, period1, hasPeriod1);
   bool dpi2State = io12DpiStateFromMask(digitalInMask, static_cast<uint8_t>(channelStart + 1U));
 
-  frame.data[0] = dutyByte;
-  frame.data[1] |= static_cast<uint8_t>((dpi1State ? 1U : 0U) << 5);
-  frame.data[1] |= static_cast<uint8_t>((periodScaled >> 16) & 0xF0U);
-  frame.data[2] = static_cast<uint8_t>((periodScaled >> 8) & 0xFFU);
-  frame.data[3] = static_cast<uint8_t>(periodScaled & 0xFFU);
+  frame.data[4] = dutyByte1;
   frame.data[5] |= static_cast<uint8_t>((dpi2State ? 1U : 0U) << 5);
+  frame.data[5] |= static_cast<uint8_t>((periodScaled1 >> 16) & 0x0FU);
+  frame.data[6] = static_cast<uint8_t>((periodScaled1 >> 8) & 0xFFU);
+  frame.data[7] = static_cast<uint8_t>(periodScaled1 & 0xFFU);
 }
 
 static void io12BuildDpiFrame2(uint32_t txId,
                                uint8_t channelStart,
                                uint8_t digitalInMask,
+                               uint32_t timerFreq0,
+                               uint32_t period0,
+                               uint32_t high0,
+                               bool hasPeriod0,
+                               uint32_t timerFreq1,
+                               uint32_t period1,
+                               uint32_t high1,
+                               bool hasPeriod1,
                                ModeTxFrame &frame) {
   frame.id = txId;
   frame.len = 8;
   memset(frame.data, 0, sizeof(frame.data));
 
+  // DPI3 (output A)
+  uint8_t dutyByte0 = io12DutyByteFromCapture(period0, high0, hasPeriod0);
+  uint32_t periodScaled0 = io12PeriodScaledFromCapture(timerFreq0, period0, hasPeriod0);
   bool dpi3State = io12DpiStateFromMask(digitalInMask, static_cast<uint8_t>(channelStart + 2U));
-  bool dpi4State = io12DpiStateFromMask(digitalInMask, static_cast<uint8_t>(channelStart + 3U));
+
+  frame.data[0] = dutyByte0;
   frame.data[1] |= static_cast<uint8_t>((dpi3State ? 1U : 0U) << 5);
+  frame.data[1] |= static_cast<uint8_t>((periodScaled0 >> 16) & 0x0FU);
+  frame.data[2] = static_cast<uint8_t>((periodScaled0 >> 8) & 0xFFU);
+  frame.data[3] = static_cast<uint8_t>(periodScaled0 & 0xFFU);
+
+  // DPI4 (output B)
+  uint8_t dutyByte1 = io12DutyByteFromCapture(period1, high1, hasPeriod1);
+  uint32_t periodScaled1 = io12PeriodScaledFromCapture(timerFreq1, period1, hasPeriod1);
+  bool dpi4State = io12DpiStateFromMask(digitalInMask, static_cast<uint8_t>(channelStart + 3U));
+
+  frame.data[4] = dutyByte1;
   frame.data[5] |= static_cast<uint8_t>((dpi4State ? 1U : 0U) << 5);
+  frame.data[5] |= static_cast<uint8_t>((periodScaled1 >> 16) & 0x0FU);
+  frame.data[6] = static_cast<uint8_t>((periodScaled1 >> 8) & 0xFFU);
+  frame.data[7] = static_cast<uint8_t>(periodScaled1 & 0xFFU);
 }
 
 static uint16_t scaleAnalog14ToMv5000(uint16_t analogRaw14) {
@@ -245,8 +311,22 @@ bool mode0HandleRx(const CanMsg &msg,
   uint8_t dutyB = msg.data[6];
   uint8_t flagsB = msg.data[7];
 
-  outputFreq[outA] = (freqA == 0U) ? defaultPwmFreqHz : freqA;
-  outputFreq[outB] = (freqB == 0U) ? defaultPwmFreqHz : freqB;
+  if (freqA != 0U) {
+    if (freqA < 50U) freqA = 50U;
+    if (freqA > 10000U) freqA = 10000U;
+    outputFreq[outA] = freqA;
+  } else if (outputFreq[outA] == 0U) {
+    outputFreq[outA] = defaultPwmFreqHz;
+  }
+
+  if (freqB != 0U) {
+    if (freqB < 50U) freqB = 50U;
+    if (freqB > 10000U) freqB = 10000U;
+    outputFreq[outB] = freqB;
+  } else if (outputFreq[outB] == 0U) {
+    outputFreq[outB] = defaultPwmFreqHz;
+  }
+
   outputDuty[outA] = dutyA;
   outputDuty[outB] = dutyB;
 
@@ -369,6 +449,118 @@ void mode0BuildTxStatusFrame(uint16_t txBaseId,
   frame.data[7] = status.canMode;
 }
 
+// ECU Master CANSWB v3 mode
+// RX: BaseId (0x640)+3 contains L1-L4 PWM duty bytes
+// TX: Always uses 0x640+0..2 for analog, switches, outputs, heartbeat
+static constexpr uint32_t ECU_MASTER_CANSWB_BASE_ID = 0x640;
+static uint8_t ecuMasterHeartbeat = 0;
+
+static uint16_t ecuMasterScaleAnalogToMv(uint16_t analogRaw14) {
+  // Scale 14-bit ADC (0..16383) to mV (0..5000)
+  uint32_t mv = (static_cast<uint32_t>(analogRaw14) * 5000UL) / 16383UL;
+  if (mv > 5000UL) {
+    mv = 5000UL;
+  }
+  return static_cast<uint16_t>(mv);
+}
+
+static bool ecuMasterCanswbHandleRx(const CanMsg &msg,
+                                     uint16_t rxBaseId,
+                                     uint16_t defaultPwmFreqHz,
+                                     uint16_t outputFreq[8],
+                                     uint8_t outputDuty[8],
+                                     uint8_t &safeMask,
+                                     uint8_t &activeMask,
+                                     bool &maskChanged,
+                                     uint8_t &inputPullupMask,
+                                     bool &pullupChanged) {
+  (void)defaultPwmFreqHz;
+  (void)outputFreq;
+  (void)safeMask;
+  (void)activeMask;
+  (void)inputPullupMask;
+  (void)pullupChanged;
+
+  maskChanged = false;
+
+  // RX ID is always BaseId+3 for ECU Master CANSWB
+  if (msg.id != (rxBaseId + 3U)) {
+    return false;
+  }
+
+  if (msg.data_length < 4) {
+    return false;
+  }
+
+  // Bytes 0-3 contain L1-L4 PWM duty values, each 0x00-0xFF
+  // Map directly to DPO1-4 (indices 0-3)
+  for (uint8_t i = 0; i < 4; i++) {
+    outputDuty[i] = msg.data[i];
+  }
+
+  return true;
+}
+
+static void ecuMasterCanswbBuildTxAnalogFrames(uint16_t txBaseId,
+                                               const uint16_t analogRaw14[8],
+                                               ModeTxFrame &frame0,
+                                               ModeTxFrame &frame1) {
+  (void)txBaseId;  // Ignore config txBaseId; always use 0x640 for ECU Master CANSWB
+
+  // Frame 0 (0x640): AV1-AV4 in mV, u16-be (big-endian)
+  frame0.id = ECU_MASTER_CANSWB_BASE_ID;
+  frame0.len = 8;
+  memset(frame0.data, 0, sizeof(frame0.data));
+  for (int i = 0; i < 4; i++) {
+    uint16_t mv = ecuMasterScaleAnalogToMv(analogRaw14[i]);
+    frame0.data[i * 2] = static_cast<uint8_t>((mv >> 8) & 0xFF);  // MSB first (big-endian)
+    frame0.data[i * 2 + 1] = static_cast<uint8_t>(mv & 0xFF);     // LSB
+  }
+
+  // Frame 1 (0x641): AV5-AV8 in mV, u16-be
+  frame1.id = ECU_MASTER_CANSWB_BASE_ID + 1;
+  frame1.len = 8;
+  memset(frame1.data, 0, sizeof(frame1.data));
+  for (int i = 0; i < 4; i++) {
+    uint16_t mv = ecuMasterScaleAnalogToMv(analogRaw14[i + 4]);
+    frame1.data[i * 2] = static_cast<uint8_t>((mv >> 8) & 0xFF);  // MSB first (big-endian)
+    frame1.data[i * 2 + 1] = static_cast<uint8_t>(mv & 0xFF);     // LSB
+  }
+}
+
+static void ecuMasterCanswbBuildTxStateFrame(uint16_t txBaseId,
+                                             uint8_t digitalInMask,
+                                             uint8_t analogStateMask,
+                                             uint8_t digitalOutMask,
+                                             uint8_t safeMask,
+                                             uint8_t activeMask,
+                                             uint8_t fwVersion,
+                                             ModeTxFrame &frame) {
+  (void)txBaseId;      // Ignore config txBaseId; always use 0x640 for ECU Master CANSWB
+  (void)fwVersion;     // Ignore fwVersion; use heartbeat counter instead
+  (void)safeMask;
+  (void)activeMask;
+
+  // Frame 2 (0x642): Rotaries, Switches, Outputs, Heartbeat
+  // Per spec:
+  //   Bytes 0-3: Rotaries 1-8 (4-bit each) - not used, set to 0
+  //   Byte 4: Switches 1-8 (1-bit each) = DI state (digitalInMask)
+  //   Byte 5: Analog switches 1-8 (1-bit each) = analog state (analogStateMask)
+  //   Byte 6: Outputs 1-4 (bits 0-3) = DO state (digitalOutMask lower nibble)
+  //   Byte 7: Heartbeat counter (incremented each frame)
+  frame.id = ECU_MASTER_CANSWB_BASE_ID + 2;
+  frame.len = 8;
+  memset(frame.data, 0, sizeof(frame.data));
+  frame.data[0] = 0;  // Rotaries byte 1 (unused)
+  frame.data[1] = 0;  // Rotaries byte 2 (unused)
+  frame.data[2] = 0;  // Rotaries byte 3 (unused)
+  frame.data[3] = 0;  // Rotaries byte 4 (unused)
+  frame.data[4] = digitalInMask;              // Switches 1-8
+  frame.data[5] = analogStateMask;            // Analog switches (threshold: 2V=0, 3V=1)
+  frame.data[6] = (digitalOutMask & 0x0FU);  // Outputs 1-4 in lower nibble
+  frame.data[7] = ecuMasterHeartbeat++;       // Heartbeat counter, increment after use
+}
+
 const char *canModeName(uint8_t mode) {
   if (mode < CAN_MODE_COUNT) {
     return CAN_MODE_NAMES[mode];
@@ -487,7 +679,11 @@ static bool haltechIo16HandleRx(uint8_t mode,
     uint8_t idx = static_cast<uint8_t>(bankStart + muxIndex);
     if (idx < 8) {
       outputDuty[idx] = duty255;
-      outputFreq[idx] = hz;
+      if (hz != 0U) {
+        outputFreq[idx] = hz;
+      } else if (outputFreq[idx] == 0U) {
+        outputFreq[idx] = defaultPwmFreqHz;
+      }
     }
     return true;
   }
@@ -554,6 +750,7 @@ static void haltechIo16BuildTxAnalogFrames(uint8_t mode,
 
 static bool haltechIo12HandleRx(uint8_t mode,
                                 const CanMsg &msg,
+                                uint16_t defaultPwmFreqHz,
                                 uint16_t outputFreq[8],
                                 uint8_t outputDuty[8],
                                 uint8_t &safeMask,
@@ -564,21 +761,29 @@ static bool haltechIo12HandleRx(uint8_t mode,
   pullupChanged = false;
 
   auto applyFrame = [&](uint8_t channelStart) {
-    if (msg.data_length < 6) {
+    if (msg.data_length < 8) {
       return false;
     }
 
     uint8_t rawOutA = msg.data[0];
     uint8_t flagsA = msg.data[1];
+    uint32_t periodScaledA = io12DecodePeriodMs20(flagsA, msg.data[2], msg.data[3]);
     uint8_t rawOutB = msg.data[4];
     uint8_t flagsB = msg.data[5];
+    uint32_t periodScaledB = io12DecodePeriodMs20(flagsB, msg.data[6], msg.data[7]);
 
-    auto applyOne = [&](uint8_t channel, uint8_t rawOut, uint8_t flags) {
+    auto applyOne = [&](uint8_t channel, uint8_t rawOut, uint8_t flags, uint32_t periodScaled) {
       if (channel >= 8U) {
         return;
       }
 
       outputDuty[channel] = io12MapRawOutToDuty255(rawOut);
+      uint16_t hz = io12PeriodScaledToHz(periodScaled);
+      if (hz != 0U) {
+        outputFreq[channel] = hz;
+      } else if (outputFreq[channel] == 0U) {
+        outputFreq[channel] = defaultPwmFreqHz;
+      }
 
       bool safeOn = (flags & 0x10U) != 0;
       bool activeStateRaw = (flags & 0x20U) != 0; // IO12: true means active LOW
@@ -593,13 +798,10 @@ static bool haltechIo12HandleRx(uint8_t mode,
       safeMask = newSafe;
       activeMask = newActive;
 
-      if (outputFreq[channel] == 0U) {
-        outputFreq[channel] = 300U;
-      }
     };
 
-    applyOne(channelStart, rawOutA, flagsA);
-    applyOne(static_cast<uint8_t>(channelStart + 1U), rawOutB, flagsB);
+    applyOne(channelStart, rawOutA, flagsA, periodScaledA);
+    applyOne(static_cast<uint8_t>(channelStart + 1U), rawOutB, flagsB, periodScaledB);
     return true;
   };
 
@@ -689,9 +891,9 @@ bool canModeHandleRx(uint8_t mode,
     case CAN_MODE_HALTECH_IO12B:
     case CAN_MODE_HALTECH_IO12AB:
       (void)rxBaseId;
-      (void)defaultPwmFreqHz;
       return haltechIo12HandleRx(mode,
                                  msg,
+                                 defaultPwmFreqHz,
                                  outputFreq,
                                  outputDuty,
                                  safeMask,
@@ -700,6 +902,17 @@ bool canModeHandleRx(uint8_t mode,
                                  pullupChanged);
 
     case CAN_MODE_ECUMASTER_CANSWB_V3:
+      return ecuMasterCanswbHandleRx(msg,
+                                     rxBaseId,
+                                     defaultPwmFreqHz,
+                                     outputFreq,
+                                     outputDuty,
+                                     safeMask,
+                                     activeMask,
+                                     maskChanged,
+                                     inputPullupMask,
+                                     pullupChanged);
+
     case CAN_MODE_MOTEC_E888:
     case CAN_MODE_EMTRON:
     case CAN_MODE_RESERVED_9:
@@ -751,6 +964,12 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
     mode0BuildTxAnalogFrames(txBaseId, analogRaw14, frame0, frame1);
     return;
   }
+
+  if (mode == CAN_MODE_ECUMASTER_CANSWB_V3) {
+    ecuMasterCanswbBuildTxAnalogFrames(txBaseId, analogRaw14, frame0, frame1);
+    return;
+  }
+
   modeStubBuildTxAnalogFrames(txBaseId, analogRaw14, frame0, frame1);
 }
 
@@ -796,6 +1015,19 @@ void canModeBuildTxStateFrame(uint8_t mode,
                            frame);
     return;
   }
+
+  if (mode == CAN_MODE_ECUMASTER_CANSWB_V3) {
+    ecuMasterCanswbBuildTxStateFrame(txBaseId,
+                                     digitalInMask,
+                                     analogStateMask,
+                                     digitalOutMask,
+                                     safeMask,
+                                     activeMask,
+                                     fwVersion,
+                                     frame);
+    return;
+  }
+
   modeStubBuildTxStateFrame(txBaseId,
                             digitalInMask,
                             analogStateMask,
@@ -818,14 +1050,6 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
                                bool hasPeriod1,
                                ModeTxFrame &frame) {
   (void)baseId;
-  (void)timerFreq0;
-  (void)period0;
-  (void)high0;
-  (void)hasPeriod0;
-  (void)timerFreq1;
-  (void)period1;
-  (void)high1;
-  (void)hasPeriod1;
 
   if (isHaltechIo12Mode(mode)) {
     uint8_t bankStart = io12BankStartForModeBank(mode, io12TxState.selectedBank);
@@ -836,15 +1060,15 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
         io12BuildDpiFrame1(IO12_DPI_TX_ID_1_A + shift,
                            bankStart,
                            io12TxState.digitalInMask,
-                           timerFreq0,
-                           period0,
-                           high0,
-                           hasPeriod0,
+                           timerFreq0, period0, high0, hasPeriod0,
+                           timerFreq1, period1, high1, hasPeriod1,
                            frame);
       } else if (io12TxState.diCallIndex == 1U) {
         io12BuildDpiFrame2(IO12_DPI_TX_ID_2_A + shift,
                            bankStart,
                            io12TxState.digitalInMask,
+                           timerFreq0, period0, high0, hasPeriod0,
+                           timerFreq1, period1, high1, hasPeriod1,
                            frame);
       } else {
         frame.id = 0;
@@ -856,15 +1080,15 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
         io12BuildDpiFrame1(IO12_DPI_TX_ID_1_A + shift,
                            bankStart,
                            io12TxState.digitalInMask,
-                           timerFreq0,
-                           period0,
-                           high0,
-                           hasPeriod0,
+                           timerFreq0, period0, high0, hasPeriod0,
+                           timerFreq1, period1, high1, hasPeriod1,
                            frame);
       } else if (io12TxState.diCallIndex == 3U) {
         io12BuildDpiFrame2(IO12_DPI_TX_ID_2_A + shift,
                            bankStart,
                            io12TxState.digitalInMask,
+                           timerFreq0, period0, high0, hasPeriod0,
+                           timerFreq1, period1, high1, hasPeriod1,
                            frame);
       } else {
         frame.id = 0;

@@ -70,6 +70,7 @@ const uint16_t DEFAULT_TX_BASE_ID = 0x700;
 const uint16_t DEFAULT_RX_BASE_ID = 0x640;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
+const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
 const uint8_t FW_VERSION = 0x03;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
@@ -109,6 +110,10 @@ adc_cfg_t adc_cfg;
 adc_channel_cfg_t adc_channel_cfg;
 adc_extended_cfg_t adc_ext_cfg;
 bool adc_ready = false;
+uint16_t adcBuf[2][NUM_ANALOG];
+volatile uint8_t adcActiveBuf = 0;
+bool adcScanRunning = false;
+uint32_t adcScanFailCount = 0;
 
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
@@ -133,6 +138,11 @@ volatile uint32_t diCapSeq[NUM_DIGITAL_IN];  // incremented on each capture even
 uint32_t diCapSeqLast[NUM_DIGITAL_IN];
 uint32_t diCapTsLast[NUM_DIGITAL_IN];
 const uint32_t DI_STALE_TIMEOUT_MS = 500;
+
+// Debounced DI state used for reported state (CAN state frame + STATUS)
+bool diDebouncedState[NUM_DIGITAL_IN];
+bool diRawPrevState[NUM_DIGITAL_IN];
+uint32_t diRawStableMs[NUM_DIGITAL_IN];
 
 // Serial connection tracking
 bool serialWelcomeSent = false;
@@ -175,6 +185,7 @@ struct CaptureCtx {
   uint32_t maxCounts;
   uint32_t timerFreqHz;
   volatile uint32_t overflowCount;  // incremented by TIMER_EVENT_CYCLE_END in captureCallback
+  int16_t overflowIrq;              // NVIC IRQ number of the cycle-end ISR, or -1 if none
 };
 
 CaptureCtx gpt0Ctx;
@@ -193,6 +204,33 @@ static bool readDigitalIn(uint8_t index) {
   uint8_t port = DIGITAL_IN_PINS[index] >> 8;
   uint8_t pin = DIGITAL_IN_PINS[index] & 0xFF;
   return R_PFS->PORT[port].PIN[pin].PmnPFS_b.PIDR ? true : false;
+}
+
+static uint8_t getDiDebounceMs() {
+  return config.reserved[0];
+}
+
+static void setDiDebounceMs(uint8_t ms) {
+  config.reserved[0] = ms;
+}
+
+static void updateDigitalInDebounce(uint32_t nowMs) {
+  uint8_t debounceMs = getDiDebounceMs();
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    bool raw = readDigitalIn(i);
+    if (debounceMs == 0U) {
+      diRawPrevState[i] = raw;
+      diDebouncedState[i] = raw;
+      diRawStableMs[i] = nowMs;
+      continue;
+    }
+    if (raw != diRawPrevState[i]) {
+      diRawPrevState[i] = raw;
+      diRawStableMs[i] = nowMs;
+    } else if (raw != diDebouncedState[i] && (uint32_t)(nowMs - diRawStableMs[i]) >= debounceMs) {
+      diDebouncedState[i] = raw;
+    }
+  }
 }
 
 static bool readDigitalOut(uint8_t index) {
@@ -309,6 +347,35 @@ static void initAdc() {
   adc_ready = true;
 }
 
+static void adcService() {
+  if (!adc_ready) {
+    return;
+  }
+
+  if (adcScanRunning) {
+    adc_status_t status;
+    R_ADC_StatusGet(&adc_ctrl, &status);
+    if (status.state == ADC_STATE_SCAN_IN_PROGRESS) {
+      return;
+    }
+
+    uint8_t writeBuf = adcActiveBuf ^ 1U;
+    for (int i = 0; i < NUM_ANALOG; i++) {
+      R_ADC_Read(&adc_ctrl, static_cast<adc_channel_t>(ANALOG_CHANNELS[i]), &adcBuf[writeBuf][i]);
+    }
+    adcActiveBuf = writeBuf;
+    adcScanRunning = false;
+  }
+
+  if (R_ADC_ScanStart(&adc_ctrl) != FSP_SUCCESS) {
+    if (adcScanFailCount != 0xFFFFFFFFUL) {
+      adcScanFailCount++;
+    }
+  } else {
+    adcScanRunning = true;
+  }
+}
+
 static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
   if (!adc_ready) {
     for (int i = 0; i < NUM_ANALOG; i++) {
@@ -317,24 +384,7 @@ static bool readAnalogRawAll(uint16_t outValues[NUM_ANALOG]) {
     return false;
   }
 
-  if (R_ADC_ScanStart(&adc_ctrl) != FSP_SUCCESS) {
-    for (int i = 0; i < NUM_ANALOG; i++) {
-      outValues[i] = 0;
-    }
-    return false;
-  }
-
-  adc_status_t status;
-  status.state = ADC_STATE_SCAN_IN_PROGRESS;
-  while (status.state == ADC_STATE_SCAN_IN_PROGRESS) {
-    R_ADC_StatusGet(&adc_ctrl, &status);
-  }
-
-  for (int i = 0; i < NUM_ANALOG; i++) {
-    uint16_t value = 0;
-    R_ADC_Read(&adc_ctrl, static_cast<adc_channel_t>(ANALOG_CHANNELS[i]), &value);
-    outValues[i] = value;
-  }
+  memcpy(outValues, adcBuf[adcActiveBuf], NUM_ANALOG * sizeof(uint16_t));
   return true;
 }
 
@@ -364,6 +414,7 @@ static void setDefaults(Config &cfg) {
   cfg.canMode = 0;
   cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
+  cfg.reserved[0] = DEFAULT_DI_DEBOUNCE_MS;
   cfg.crc = computeCrc(cfg);
 }
 
@@ -389,6 +440,9 @@ static void loadConfig() {
     if (config.outFreqHz[p] < 50 || config.outFreqHz[p] > 10000) {
       config.outFreqHz[p] = DEFAULT_PWM_FREQ_HZ;
     }
+  }
+  if (getDiDebounceMs() > 100U) {
+    setDiDebounceMs(DEFAULT_DI_DEBOUNCE_MS);
   }
 }
 
@@ -438,12 +492,21 @@ static void captureCallback(timer_callback_args_t *p_args) {
   }
   if (idx >= NUM_DIGITAL_IN) return;
 
-  // Sample overflow counter around captured count read so we don't mis-attribute
-  // an overflow that lands between the two reads.
-  uint32_t ovf1 = ctx->overflowCount;
+  // Determine the overflow count that was current when this capture occurred.
+  // Problem: on Cortex-M, same-priority IRQs cannot preempt each other. If the
+  // overflow (CYCLE_END) IRQ fires at the same moment as this capture IRQ, the
+  // overflow ISR is queued but hasn't run yet — so ctx->overflowCount is still
+  // the pre-overflow value even though the hardware counter has already wrapped.
+  // We detect this via NVIC_GetPendingIRQ: if the overflow IRQ is pending AND
+  // the captured count is already small (< half of max, i.e. counter wrapped),
+  // the overflow happened before this capture. Add 1 to compensate.
+  uint32_t nowOv = ctx->overflowCount;
   uint32_t captured = p_args->capture;
-  uint32_t ovf2 = ctx->overflowCount;
-  uint32_t nowOv = (ovf2 != ovf1 && captured < (ctx->maxCounts >> 1U)) ? ovf2 : ovf1;
+  if (ctx->overflowIrq >= 0 &&
+      NVIC_GetPendingIRQ(static_cast<IRQn_Type>(ctx->overflowIrq)) &&
+      captured < (ctx->maxCounts >> 1U)) {
+    nowOv++;
+  }
 
   bool level = readDigitalIn(idx);
 
@@ -508,6 +571,7 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   ctx.maxCounts = 0xFFFFFFFF;
   ctx.timerFreqHz = 0;
   ctx.overflowCount = 0;
+  ctx.overflowIrq = -1;
 
   // Arduino variant marks GPT0-3 as TIMER_PWM for default PWM pins.
   // force_use_of_pwm_reserved_timer() allows begin() to claim these channels
@@ -546,6 +610,16 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   // Update context with actual timer parameters now that it's running
   ctx.maxCounts = timer.get_period_raw();
   ctx.timerFreqHz = timer.get_freq_hz();
+
+  // Store the cycle-end IRQ number so captureCallback can check NVIC_GetPendingIRQ
+  // to detect an overflow that fired simultaneously with a capture but hasn't been
+  // serviced yet (same-priority IRQs can't preempt each other on Cortex-M).
+  if ((gptChannel == 2U || gptChannel == 3U) &&
+      irqOvf &&
+      timer.get_cfg() != nullptr &&
+      timer.get_cfg()->cycle_end_irq >= 0) {
+    ctx.overflowIrq = static_cast<int16_t>(timer.get_cfg()->cycle_end_irq);
+  }
 
   diTimerFreq[idxA] = ctx.timerFreqHz;
   diTimerFreq[idxB] = ctx.timerFreqHz;
@@ -823,6 +897,9 @@ static void processCan() {
 }
 
 static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+  if (len > 0 && data == nullptr) {
+    return;
+  }
   // Zero-init the whole struct â€” CanMsg has fields beyond id/data_length/data
   // (e.g. rtr, extended flags) that the RA4M1 CAN controller reads.
   // Without this, those fields are garbage on calls 2-N and the controller
@@ -831,7 +908,9 @@ static void sendCanFrame(uint32_t id, const uint8_t *data, uint8_t len) {
   memset(&tx, 0, sizeof(tx));
   tx.id = id;
   tx.data_length = len;
-  memcpy(tx.data, data, len);
+  if (len > 0) {
+    memcpy(tx.data, data, len);
+  }
 
   // Bounded retry so burst TX frames are not dropped on a busy mailbox,
   // but without long blocking delays that starve foreground work.
@@ -866,7 +945,7 @@ static void sendTxFrames() {
 
   uint8_t digitalInMask = 0;
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    if (readDigitalIn(i)) {
+    if (diDebouncedState[i]) {
       digitalInMask |= (1 << i);
     }
   }
@@ -943,30 +1022,38 @@ static void sendTxFrames() {
     }
   };
 
-  packFreqDuty(0, config.txBaseId + 3);
-  packFreqDuty(2, config.txBaseId + 4);
-  packFreqDuty(4, config.txBaseId + 5);
-  packFreqDuty(6, config.txBaseId + 6);
+  // ECU Master CANSWB only sends the 3 analog/state frames above; skip DI and status frames
+  if (config.canMode != CAN_MODE_ECUMASTER_CANSWB_V3) {
+    packFreqDuty(0, config.txBaseId + 3);
+    packFreqDuty(2, config.txBaseId + 4);
+    packFreqDuty(4, config.txBaseId + 5);
+    packFreqDuty(6, config.txBaseId + 6);
 
-  Mode0Status modeStatus;
-  modeStatus.canInitOk = canInitOk;
-  modeStatus.outputsInSafeState = outputsInSafeState;
-  modeStatus.canRxCount = canRxCount;
-  modeStatus.canTxCount = canTxCount;
-  modeStatus.canTxFail = canTxFail;
-  modeStatus.canMode = config.canMode;
-  modeStatus.lastCanRxMs = lastCanRxMs;
-  modeStatus.rxTimeoutMs = config.rxTimeoutMs;
-  modeStatus.nowMs = millis();
+    Mode0Status modeStatus;
+    modeStatus.canInitOk = canInitOk;
+    modeStatus.outputsInSafeState = outputsInSafeState;
+    modeStatus.canRxCount = canRxCount;
+    modeStatus.canTxCount = canTxCount;
+    modeStatus.canTxFail = canTxFail;
+    modeStatus.canMode = config.canMode;
+    modeStatus.lastCanRxMs = lastCanRxMs;
+    modeStatus.rxTimeoutMs = config.rxTimeoutMs;
+    modeStatus.nowMs = millis();
 
-  canModeBuildTxStatusFrame(config.canMode, config.txBaseId, modeStatus, frame);
-  if (frame.len > 0) {
-    sendCanFrame(frame.id, frame.data, frame.len);
+    canModeBuildTxStatusFrame(config.canMode, config.txBaseId, modeStatus, frame);
+    if (frame.len > 0) {
+      sendCanFrame(frame.id, frame.data, frame.len);
+    }
   }
 }
 
 static void printDiag() {
   Serial.println("\n========== DIAG ==========");
+
+  Serial.print("ADC: ready="); Serial.print(adc_ready ? "YES" : "NO");
+  Serial.print(" scanRunning="); Serial.print(adcScanRunning ? "YES" : "NO");
+  Serial.print(" activeBuf="); Serial.print(adcActiveBuf);
+  Serial.print(" scanFail="); Serial.println(adcScanFailCount);
 
   // GPT capture timer diagnostics
   struct { FspTimer *timer; CaptureCtx *ctx; uint8_t ch; const char *label; } timers[] = {
@@ -976,7 +1063,13 @@ static void printDiag() {
     {&gpt3, &gpt3Ctx, 3, "GPT3 (DI8-A, DI7-B)"},
   };
   for (auto &t : timers) {
-    gpt_extended_cfg_t *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t.timer->get_cfg()->p_extend));
+    const timer_cfg_t *tmrCfg = t.timer->get_cfg();
+    if (tmrCfg == nullptr || tmrCfg->p_extend == nullptr) {
+      Serial.print(t.label);
+      Serial.println(": cfg unavailable");
+      continue;
+    }
+    gpt_extended_cfg_t *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(tmrCfg->p_extend));
     uint32_t baseAddr = (uint32_t)R_GPT0 + (t.ch * ((uint32_t)R_GPT1 - (uint32_t)R_GPT0));
     R_GPT0_Type *reg = (R_GPT0_Type *)baseAddr;
 
@@ -1082,6 +1175,7 @@ static void printHelp() {
   Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-8)");
   Serial.println("  DIPULLUP <ch> <0|1>      - Set DI internal pull-up (1-8)");
   Serial.println("  DIPULLUPMASK <hex>       - Set DI pull-up bitmask (bit0=DI1..bit7=DI8)");
+  Serial.println("  DIDEBOUNCE <ms>          - Set DI state debounce (0-100 ms)");
   Serial.println("  DEFAULTS                - Reset all config to factory defaults");
   Serial.println();
 }
@@ -1137,7 +1231,7 @@ static void printStatusOnce() {
   Serial.println();
   Serial.println("--- Digital Inputs ---");
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
-    bool state = readDigitalIn(i);
+    bool state = diDebouncedState[i];
     uint32_t period;
     uint32_t high;
     bool hasP;
@@ -1251,6 +1345,9 @@ static void printConfig() {
   Serial.println(config.activeMask, HEX);
   Serial.print("DI Pullup Mask: 0x");
   Serial.println(config.inputPullupMask, HEX);
+  Serial.print("DI Debounce: ");
+  Serial.print(getDiDebounceMs());
+  Serial.println(" ms");
   Serial.print("Out Freq Pair 1: ");
   Serial.print(config.outFreqHz[0]);
   Serial.println(" Hz");
@@ -1395,9 +1492,27 @@ static void handleSerial() {
     return;
   }
 
+  if (cmd.startsWith("DIDEBOUNCE")) {
+    int ms = getArg(1).toInt();
+    if (ms < 0 || ms > 100) {
+      Serial.println("ERR: DIDEBOUNCE <ms> (0-100)");
+      return;
+    }
+    setDiDebounceMs(static_cast<uint8_t>(ms));
+    saveConfig();
+    Serial.print("OK: DI debounce ");
+    Serial.print(ms);
+    Serial.println(" ms");
+    return;
+  }
+
   if (cmd.startsWith("TXBASE")) {
     String arg = getArg(1);
     uint16_t id = static_cast<uint16_t>(strtol(arg.c_str(), nullptr, 0));
+    if (id > 0x7FFU) {
+      Serial.println("ERR: CAN ID must be 0x000-0x7FF (11-bit)");
+      return;
+    }
     config.txBaseId = id;
     saveConfig();
     Serial.println("OK");
@@ -1407,6 +1522,10 @@ static void handleSerial() {
   if (cmd.startsWith("RXBASE")) {
     String arg = getArg(1);
     uint16_t id = static_cast<uint16_t>(strtol(arg.c_str(), nullptr, 0));
+    if (id > 0x7FFU) {
+      Serial.println("ERR: CAN ID must be 0x000-0x7FF (11-bit)");
+      return;
+    }
     config.rxBaseId = id;
     saveConfig();
     Serial.println("OK");
@@ -1729,6 +1848,15 @@ void setup() {
   // overwritten by subsequent IRQManager allocations (CAN, NeoPixel, etc.).
   initCaptureInputs();
 
+  // Seed debounce state from current raw pin levels
+  uint32_t nowMs = millis();
+  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+    bool raw = readDigitalIn(i);
+    diRawPrevState[i] = raw;
+    diDebouncedState[i] = raw;
+    diRawStableMs[i] = nowMs;
+  }
+
   applyOutputs(true);
   outputsInSafeState = true;
 
@@ -1760,6 +1888,8 @@ void loop() {
     Serial.println();
   }
 
+  adcService();
+
   handleSerial();
   processCan();
   // Refresh now after processCan() so that time-delta checks below (safe-state
@@ -1768,6 +1898,9 @@ void loop() {
   // to a newer millis(), unsigned subtraction (now - lastCanRxMs) would wrap to
   // ~4 billion and trigger the RX-timeout safe-state every single loop.
   now = millis();
+
+  // Keep debounced DI state updated independently of CAN TX cadence.
+  updateDigitalInDebounce(now);
 
   // Deferred config save: EEPROM writes are never issued inside the CAN drain
   // loop.  The pending flag is set by handleCanRx() and flushed here, with a
