@@ -39,6 +39,9 @@ static constexpr uint32_t IO12_DPI_TX_ID_1_A = 0x2C2;
 static constexpr uint32_t IO12_DPI_TX_ID_2_A = 0x2C4;
 static constexpr uint32_t IO12_DPO_RX_ID_1_A = 0x2D0;
 static constexpr uint32_t IO12_DPO_RX_ID_2_A = 0x2D2;
+static constexpr uint32_t IO12_KEEPALIVE_TX_ID_1 = 0x2C6;
+static constexpr uint32_t IO12_KEEPALIVE_TX_ID_2 = 0x2C7;
+static constexpr uint8_t IO12_KEEPALIVE_DATA[5] = {0x10, 0x09, 0x0D, 0x01, 0x00};
 
 struct Io12TxState {
   uint8_t digitalInMask;
@@ -851,6 +854,14 @@ static void haltechIo12BuildTxAnalogFrame(uint8_t mode,
   }
 }
 
+static void haltechIo12BuildKeepAliveFrame(uint32_t txId,
+                                           ModeTxFrame &frame) {
+  frame.id = txId;
+  frame.len = 5;
+  memset(frame.data, 0, sizeof(frame.data));
+  memcpy(frame.data, IO12_KEEPALIVE_DATA, sizeof(IO12_KEEPALIVE_DATA));
+}
+
 bool canModeHandleRx(uint8_t mode,
                      const CanMsg &msg,
                      uint16_t rxBaseId,
@@ -991,9 +1002,7 @@ void canModeBuildTxStateFrame(uint8_t mode,
 
   if (isHaltechIo12Mode(mode)) {
     io12TxState.digitalInMask = digitalInMask;
-    frame.id = 0;
-    frame.len = 0;
-    memset(frame.data, 0, sizeof(frame.data));
+    haltechIo12BuildKeepAliveFrame(IO12_KEEPALIVE_TX_ID_1, frame);
     return;
   }
 
@@ -1141,9 +1150,7 @@ void canModeBuildTxStatusFrame(uint8_t mode,
   (void)status;
 
   if (isHaltechIo12Mode(mode)) {
-    frame.id = 0;
-    frame.len = 0;
-    memset(frame.data, 0, sizeof(frame.data));
+    haltechIo12BuildKeepAliveFrame(IO12_KEEPALIVE_TX_ID_2, frame);
     return;
   }
 
