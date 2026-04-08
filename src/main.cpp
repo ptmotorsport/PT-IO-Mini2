@@ -7,6 +7,7 @@
 #include "r_adc.h"
 #include "FspTimer.h"
 #include "can_modes.h"
+#include "protocol.h"
 
 // NeoPixel Configuration
 #define NEOPIXEL_PIN 11  // P109 = Arduino D11
@@ -71,7 +72,7 @@ const uint16_t DEFAULT_RX_BASE_ID = 0x640;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
-const uint8_t FW_VERSION = 0x03;
+const uint8_t FW_VERSION = 0x06;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
@@ -147,6 +148,9 @@ uint32_t diRawStableMs[NUM_DIGITAL_IN];
 // Serial connection tracking
 bool serialWelcomeSent = false;
 
+// JSON telemetry subscription
+TelemetrySubscription telemetrySub = {false, TELEMETRY_FORMAT_TEXT, 1000, 0};
+
 // Runtime status
 uint32_t lastCanRxMs = 0;
 uint32_t lastTxMs = 0;
@@ -159,7 +163,7 @@ bool canInitOk = false;
 uint16_t canRxCount = 0;
 uint16_t canTxCount = 0;
 uint16_t canTxFail = 0;
-bool serialOverride = false;  // when true, CAN watchdog is bypassed for serial testing
+uint8_t serialOverrideMask = 0x00;  // bitmask: bit set = channel under serial/app control, not CAN
 bool rxDebug = false;         // when true, log RX duties, applyOutputs triggers and TX failures
 
 // Timers - input capture
@@ -206,11 +210,11 @@ static bool readDigitalIn(uint8_t index) {
   return R_PFS->PORT[port].PIN[pin].PmnPFS_b.PIDR ? true : false;
 }
 
-static uint8_t getDiDebounceMs() {
+uint8_t getDiDebounceMs() {
   return config.reserved[0];
 }
 
-static void setDiDebounceMs(uint8_t ms) {
+void setDiDebounceMs(uint8_t ms) {
   config.reserved[0] = ms;
 }
 
@@ -280,7 +284,7 @@ static void configureGptPeripheralForChannel(bsp_io_port_pin_t pin, uint8_t chan
                   (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_CFG_PIM_TTL | IOPORT_PERIPHERAL_GPT1));
 }
 
-static void applyInputPullups() {
+void applyInputPullups() {
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
     uint32_t cfg = (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_CFG_PIM_TTL | IOPORT_PERIPHERAL_GPT1);
     if (((config.inputPullupMask >> i) & 0x01U) != 0U) {
@@ -397,7 +401,7 @@ static uint16_t computeCrc(const Config &cfg) {
   return crc;
 }
 
-static void setDefaults(Config &cfg) {
+void setDefaults(Config &cfg) {
   cfg.magic = CONFIG_MAGIC;
   cfg.version = CONFIG_VERSION;
   cfg.canSpeedKbps = DEFAULT_CAN_SPEED_KBPS;
@@ -418,7 +422,7 @@ static void setDefaults(Config &cfg) {
   cfg.crc = computeCrc(cfg);
 }
 
-static void saveConfig() {
+void saveConfig() {
   config.crc = computeCrc(config);
   EEPROM.put(0, config);
   Serial.println("[EEPROM] config written");
@@ -625,7 +629,7 @@ static void initCaptureTimer(FspTimer &timer, CaptureCtx &ctx, uint8_t gptChanne
   diTimerFreq[idxB] = ctx.timerFreqHz;
 }
 
-static bool setCanBitrate(uint16_t kbps) {
+bool setCanBitrate(uint16_t kbps) {
   CanBitRate rate;
   switch (kbps) {
     case 125: rate = CanBitRate::BR_125k; break;
@@ -666,12 +670,14 @@ static void reinitOutputTimer(FspTimer &timer, uint8_t gptChannel,
 }
 
 // Apply output values using hardware PWM (GPT4, GPT5, GPT6) and GPIO
-static void applyOutputs(bool useSafeState) {
+void applyOutputs(bool useSafeState) {
   uint8_t newDuty[NUM_DIGITAL_OUT];
 
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t duty = outputDuty[i];
-    if (useSafeState) {
+    // Apply safe state only to channels NOT under serial/app override
+    bool isOverridden = (serialOverrideMask >> i) & 0x01;
+    if (useSafeState && !isOverridden) {
       bool safeOn = (config.safeMask >> i) & 0x01;
       duty = safeOn ? 255 : 0;
     }
@@ -812,10 +818,6 @@ static void applyOutputs(bool useSafeState) {
 static bool pendingConfigSave = false;
 
 static void handleCanRx(const CanMsg &msg) {
-  if (serialOverride) {
-    return;
-  }
-
   // Snapshot duty/freq so we can detect whether outputs actually changed
   uint8_t  prevDuty[NUM_DIGITAL_OUT];
   uint16_t prevFreq[NUM_DIGITAL_OUT];
@@ -838,6 +840,15 @@ static void handleCanRx(const CanMsg &msg) {
 
   if (!handled) {
     return;
+  }
+
+  // Restore any serial-overridden channels to their pre-CAN values
+  // (CAN should not control channels under serial/app override)
+  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+    if ((serialOverrideMask >> i) & 0x01) {
+      outputDuty[i] = prevDuty[i];
+      outputFreq[i] = prevFreq[i];
+    }
   }
 
   // Defer EEPROM writes â€” never call saveConfig() from within the CAN drain
@@ -1170,7 +1181,7 @@ static void printHelp() {
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
   Serial.println("  OUTFREQ <ch> <hz>       - Set output channel PWM frequency (1-8)");
   Serial.println("  CONFIG                 - Print stored configuration");
-  Serial.println("  SERIALOVERRIDE ON|OFF  - Enable/disable serial test override");
+  Serial.println("  SERIALOVERRIDE <mask>  - Set serial override mask (0x00-0xFF)");
   Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-8)");
   Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-8)");
   Serial.println("  DIPULLUP <ch> <0|1>      - Set DI internal pull-up (1-8)");
@@ -1200,8 +1211,8 @@ static void printStatusOnce() {
   Serial.print(config.rxTimeoutMs);
   Serial.print(" ms  SafeState=");
   Serial.print(outputsInSafeState ? "YES" : "NO");
-  Serial.print("  SerialOverride=");
-  Serial.println(serialOverride ? "ON" : "OFF");
+  Serial.print("  SerialOverride=0x");
+  Serial.println(serialOverrideMask, HEX);
   Serial.print("ADC: ");
   Serial.print(ADC_RESOLUTION);
   Serial.print("-bit (0-");
@@ -1337,8 +1348,8 @@ static void printConfig() {
   Serial.print(" (");
   Serial.print(canModeName(config.canMode));
   Serial.println(")");
-  Serial.print("Serial Override: ");
-  Serial.println(serialOverride ? "ON" : "OFF");
+  Serial.print("Serial Override: 0x");
+  Serial.println(serialOverrideMask, HEX);
   Serial.print("Safe Mask: 0x");
   Serial.println(config.safeMask, HEX);
   Serial.print("Active Mask: 0x");
@@ -1389,6 +1400,89 @@ static void handleSerial() {
   String line = readLine();
   if (line.length() == 0) return;
   line.trim();
+  
+  // Detect JSON commands (start with '{')
+  if (line.startsWith("{")) {
+    bool configChanged = false;
+    bool outputsChanged = false;
+    bool pullupChanged = false;
+    
+    JsonCmdResult result = handleJsonCommand(
+      line, telemetrySub, outputDuty, outputFreq,
+      config.safeMask, config.activeMask, config.inputPullupMask,
+      configChanged, outputsChanged, pullupChanged, serialOverrideMask
+    );
+    
+    if (!result.success) {
+      sendJsonError(result.errorMsg.c_str());
+      return;
+    }
+    
+    // Handle special command markers
+    if (result.errorMsg == "getConfig") {
+      // Build device state and send config
+      uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
+      DeviceState state = {
+        adcBuf[readBuf], NUM_ANALOG,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
+      };
+      sendJsonConfig(state);
+      return;
+    }
+    
+    if (result.errorMsg == "getHello") {
+      // Send hello message
+      sendJsonHello(FW_VERSION, config.canMode);
+      return;
+    }
+    
+    if (result.errorMsg == "getStatus") {
+      // Build and send telemetry
+      uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
+      DeviceState state = {
+        adcBuf[readBuf], NUM_ANALOG,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
+      };
+      sendJsonTelemetry(state);
+      return;
+    }
+    
+    if (result.errorMsg == "resetDefaults") {
+      setDefaults(config);
+      saveConfig();
+      for (int p = 0; p < 4; p++) {
+        outputFreq[p * 2]     = config.outFreqHz[p];
+        outputFreq[p * 2 + 1] = config.outFreqHz[p];
+      }
+      applyOutputs(outputsInSafeState);
+      sendJsonResponse(true, "Defaults restored");
+      return;
+    }
+    
+    // Apply changes
+    if (configChanged) {
+      saveConfig();
+    }
+    if (outputsChanged) {
+      applyOutputs(outputsInSafeState);
+    }
+    if (pullupChanged) {
+      applyInputPullups();
+    }
+    
+    sendJsonResponse(true);
+    return;
+  }
+  
+  // Text command processing
   String cmd = line;
   cmd.toUpperCase();
 
@@ -1467,16 +1561,20 @@ static void handleSerial() {
     String arg = getArg(1);
     arg.trim();
     if (arg == "ON") {
-      serialOverride = true;
-      Serial.println("OK: Serial override ON");
+      serialOverrideMask = 0xFF;  // All channels overridden
+      Serial.println("OK: Serial override ALL channels");
       return;
     }
     if (arg == "OFF") {
-      serialOverride = false;
+      serialOverrideMask = 0x00;  // No channels overridden
       Serial.println("OK: Serial override OFF");
       return;
     }
-    Serial.println("ERR: SERIALOVERRIDE ON|OFF");
+    // Parse as hex mask
+    uint8_t mask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0));
+    serialOverrideMask = mask;
+    Serial.print("OK: Serial override mask=0x");
+    Serial.println(serialOverrideMask, HEX);
     return;
   }
 
@@ -1654,13 +1752,14 @@ static void handleSerial() {
       return;
     }
     outputDuty[ch - 1] = static_cast<uint8_t>((pct * 255 + 50) / 100);
-    serialOverride = true;  // disable CAN watchdog while using serial
+    // Set this channel's override bit (enable serial control)
+    serialOverrideMask |= (1 << (ch - 1));
     outputsInSafeState = false;
     lastCanRxMs = millis();
     applyOutputs(false);
     Serial.print("OK: DPO"); Serial.print(ch);
     Serial.print(" = "); Serial.print(pct); Serial.println("%");
-    Serial.println("INFO: Serial override ON (CAN output control paused)");
+    Serial.print("INFO: Serial override enabled for channel "); Serial.println(ch);
     return;
   }
 
@@ -1873,6 +1972,11 @@ void loop() {
   // won't receive data until the port is opened by a terminal application.
   if (!serialWelcomeSent && Serial) {
     serialWelcomeSent = true;
+    
+    // Send JSON hello message first for GUI auto-discovery
+    sendJsonHello(FW_VERSION, config.canMode);
+    
+    // Then text banner for CLI users
     Serial.println();
     Serial.println("============================================");
     Serial.println("      PT-IO-Mini2  CAN I/O Expander");
@@ -1919,8 +2023,10 @@ void loop() {
     configDirtyMs = 0;
   }
 
-  if (!outputsInSafeState && !serialOverride && (now - lastCanRxMs > config.rxTimeoutMs)) {
-    applyOutputs(true);
+  // CAN watchdog: put non-overridden channels into safe state on timeout
+  // Serial-overridden channels remain under app control
+  if (!outputsInSafeState && (now - lastCanRxMs > config.rxTimeoutMs)) {
+    applyOutputs(true);  // applyOutputs respects serialOverrideMask
     outputsInSafeState = true;
   }
 
@@ -1943,9 +2049,34 @@ void loop() {
     }
   }
 
+  // Handle telemetry subscription (JSON or text monitor)
+  if (telemetrySub.enabled && (now - telemetrySub.lastSendMs >= telemetrySub.intervalMs)) {
+    telemetrySub.lastSendMs = now;
+    
+    if (telemetrySub.format == TELEMETRY_FORMAT_JSON) {
+      // Send JSON telemetry
+      uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
+      DeviceState state = {
+        adcBuf[readBuf], NUM_ANALOG,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, now
+      };
+      sendJsonTelemetry(state);
+    } else {
+      // Text format (existing monitor)
+      printStatusOnce();
+    }
+  }
+  
+  // Legacy text MONITOR command compatibility
   if (monitorEnabled && (now - lastMonitorMs >= monitorIntervalMs)) {
     lastMonitorMs = now;
-    printStatusOnce();
+    if (!telemetrySub.enabled) {  // Don't double-send if JSON subscription is active
+      printStatusOnce();
+    }
   }
 
   if (config.txRateHz > 0) {

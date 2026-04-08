@@ -10,17 +10,19 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ---
 
-## Current State (March 2026)
+## Current State (April 2026)
 
 ### What Works
 - **8× Analog inputs** — 14-bit ADC, all channels working
-- **8× Digital inputs** — GPT input capture, frequency + duty cycle measurement (overflow-aware)
+- **8× Digital inputs** — GPT input capture, frequency + duty cycle measurement (overflow-aware), configurable debounce (0-100ms)
 - **8× Digital outputs** — Hardware GPT PWM (GPT4/5/6) + GPIO, per-pair frequency configurable at runtime
 - **CAN bus** — TX/RX with configurable IDs, rates, timeout-based safe state
 - **USB CDC serial CLI** — Full command set (STATUS, DIAG, OUT, CONFIG, DEFAULTS, etc.)
+- **USB CDC JSON protocol** — 14 commands for GUI applications, telemetry streaming, device auto-discovery
+- **Per-channel serial override** — Individual outputs can be under app control while others remain under CAN control
 - **EEPROM config** — Persistent settings with CRC validation
 - **NeoPixel** — Status LED indicator
-- **CAN watchdog** — Outputs go to safe state on RX timeout, bypassed with `serialOverride`
+- **CAN watchdog** — Outputs go to safe state on RX timeout, with per-channel override support
 
 ### Known Issues (Prototype Only — Fixed in Rev 2 Pinout)
 - **DI5 (P107/GPT0A)**: Intermittent capture — init ordering fix applied (initCaptureInputs runs last), may still need verification on new hardware
@@ -32,6 +34,27 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 - **Output frequency locked at 300 Hz** — `initHardwarePwm()` always used the default 300 Hz constant and `applyOutputs()` never changed the timer period. Fix: `initHardwarePwm()` now reads from the loaded `outputFreq[]` values; `applyOutputs()` detects per-pair frequency changes and calls `reinitOutputTimer()`.
 - **DI5 (GPT0A) NVIC slot collision** — `initCaptureInputs()` ran before `CAN.begin()`, which called IRQManager and could overwrite the IELSR slot allocated for GPT0 capture-A. Fix: `initCaptureInputs()` now runs last in `setup()`, after CAN and NeoPixel initialisation.
 - **Serial welcome message lost on boot** — USB CDC `Serial.begin()` returns immediately; output sent before the host opens the port is discarded. Fix: welcome banner is deferred and sent in `loop()` on first `Serial` connect.
+
+---
+
+## Version History
+
+### v0.0.6 (April 2026)
+**JSON Protocol & Per-Channel Override**
+
+Added complete JSON protocol for GUI applications alongside existing text CLI:
+- **14 JSON commands**: subscribe, unsubscribe, getHello, setOutput, setOutputFreq, setSafe, setActive, setInputPullup, setDebounce, getConfig, getStatus, setCanConfig, resetDefaults, setSerialOverride
+- **Telemetry streaming**: Configurable interval (10-1000ms), full device state (analog, digital, outputs, CAN status)
+- **Auto-detection**: Device sends hello message on USB connection, app can request it with getHello
+- **Per-channel serial override**: Changed from global bool to 8-bit bitmask, allows mixed CAN/app control (e.g., CAN controls safety-critical outputs while app controls auxiliary LEDs)
+- **Debounce configuration**: Added setDebounce command (0-100ms) with EEPROM persistence
+- **Protocol documentation**: Complete PROTOCOL.md with all commands, telemetry format, error handling, and test scripts
+- **Test utilities**: PowerShell and Python test scripts for protocol validation
+
+Backward compatible: All existing text CLI commands unchanged. Device auto-detects JSON (lines starting with `{`) vs text commands.
+
+### v0.0.5 and earlier
+See Fixed Bugs section above for March 2026 fixes (timer overflow, frequency setting, NVIC collision, USB CDC serial timing).
 
 ---
 
