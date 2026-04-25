@@ -1,6 +1,5 @@
 ﻿#include <Arduino.h>
 #include <Arduino_CAN.h>
-#include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 #include "bsp_api.h"
 #include "r_ioport.h"
@@ -9,10 +8,93 @@
 #include "can_modes.h"
 #include "protocol.h"
 
-// NeoPixel Configuration
-#define NEOPIXEL_PIN 11  // P109 = Arduino D11
+// NeoPixel Configuration (raw BSP pin, not Arduino pin index)
+#define NEOPIXEL_BSP_PIN BSP_IO_PORT_04_PIN_00  // P400
 #define NEOPIXEL_COUNT 1
-Adafruit_NeoPixel neopixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+constexpr uint8_t NEOPIXEL_BRIGHTNESS = 26; // ~10% of 255
+
+// WS2812 timing (800 kHz) using DWT cycle counter on Cortex-M4.
+#define ARM_DEMCR (*((volatile uint32_t *)0xE000EDFCUL))
+#define ARM_DEMCR_TRCENA (1UL << 24)
+#define ARM_DWT_CTRL (*((volatile uint32_t *)0xE0001000UL))
+#define ARM_DWT_CTRL_CYCCNTENA (1UL << 0)
+#define ARM_DWT_CYCCNT (*((volatile uint32_t *)0xE0001004UL))
+
+static volatile uint16_t *neoSetReg = nullptr;
+static volatile uint16_t *neoClrReg = nullptr;
+static uint16_t neoMask = 0;
+
+static uint8_t scaleNeo(uint8_t value) {
+  return static_cast<uint8_t>(((uint16_t)value * NEOPIXEL_BRIGHTNESS + 127U) / 255U);
+}
+
+static uint32_t makeNeoColor(uint8_t r, uint8_t g, uint8_t b) {
+  return (static_cast<uint32_t>(r) << 16) |
+         (static_cast<uint32_t>(g) << 8) |
+         static_cast<uint32_t>(b);
+}
+
+static void neopixelInitRaw() {
+  constexpr uint32_t IOPORT_CFG_OUTPUT_LOW =
+    IOPORT_CFG_PORT_DIRECTION_OUTPUT | IOPORT_CFG_PORT_OUTPUT_LOW;
+
+  R_IOPORT_PinCfg(&g_ioport_ctrl, NEOPIXEL_BSP_PIN, IOPORT_CFG_OUTPUT_LOW);
+
+  // Port registers are spaced evenly by device definition; derive POSR/PORR from pin.
+  R_PORT0_Type *port = (R_PORT0_Type *)(R_PORT0 + ((uint32_t)(R_PORT1 - R_PORT0) * (NEOPIXEL_BSP_PIN >> 8U)));
+  neoSetReg = &port->POSR;
+  neoClrReg = &port->PORR;
+  neoMask = static_cast<uint16_t>(1U << (NEOPIXEL_BSP_PIN & 0xFFU));
+}
+
+static void neopixelShowRaw(uint8_t r, uint8_t g, uint8_t b) {
+  if (neoSetReg == nullptr || neoClrReg == nullptr) {
+    return;
+  }
+
+  // WS2812 expects GRB byte order.
+  uint8_t bytes[3] = {scaleNeo(g), scaleNeo(r), scaleNeo(b)};
+
+  constexpr uint32_t fCpu = 48000000UL;
+  constexpr uint32_t cyclesT0H = fCpu / 4000000UL;  // ~0.25 us
+  constexpr uint32_t cyclesT1H = fCpu / 1250000UL;  // ~0.80 us
+  constexpr uint32_t cyclesBit = fCpu / 800000UL;   // 1.25 us
+
+  noInterrupts();
+  ARM_DEMCR |= ARM_DEMCR_TRCENA;
+  ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
+
+  uint32_t cyc = ARM_DWT_CYCCNT + cyclesBit;
+  for (uint8_t i = 0; i < 3; i++) {
+    uint8_t pix = bytes[i];
+    for (uint8_t mask = 0x80; mask != 0; mask >>= 1) {
+      while ((ARM_DWT_CYCCNT - cyc) < cyclesBit) {
+      }
+      cyc = ARM_DWT_CYCCNT;
+      *neoSetReg = neoMask;
+      if (pix & mask) {
+        while ((ARM_DWT_CYCCNT - cyc) < cyclesT1H) {
+        }
+      } else {
+        while ((ARM_DWT_CYCCNT - cyc) < cyclesT0H) {
+        }
+      }
+      *neoClrReg = neoMask;
+    }
+  }
+  while ((ARM_DWT_CYCCNT - cyc) < cyclesBit) {
+  }
+
+  interrupts();
+  delayMicroseconds(60);  // Latch time
+}
+
+static void neopixelShowPacked(uint32_t color) {
+  uint8_t r = static_cast<uint8_t>((color >> 16) & 0xFFU);
+  uint8_t g = static_cast<uint8_t>((color >> 8) & 0xFFU);
+  uint8_t b = static_cast<uint8_t>(color & 0xFFU);
+  neopixelShowRaw(r, g, b);
+}
 
 // Analog Input Pin Definitions (using FSP)
 const bsp_io_port_pin_t ANALOG_PINS[] = {
@@ -51,12 +133,12 @@ const bsp_io_port_pin_t DIGITAL_OUT_PINS[] = {
   BSP_IO_PORT_04_PIN_09,  // P409 - DPO2 (GTIOC5A)
   BSP_IO_PORT_04_PIN_10,  // P410 - DPO3 (GTIOC6B)
   BSP_IO_PORT_04_PIN_11,  // P411 - DPO4 (GTIOC6A)
-  BSP_IO_PORT_03_PIN_02,  // P302 - DPO5 (GTIOC4A)
-  BSP_IO_PORT_03_PIN_01,  // P301 - DPO6 (GTIOC4B)
-  BSP_IO_PORT_03_PIN_00,  // P300 - DPO7 (SWCLK, GPIO only)
-  BSP_IO_PORT_01_PIN_08   // P108 - DPO8 (SWDIO, GPIO only)
+  BSP_IO_PORT_03_PIN_04,  // P304 - DPO5 (GTIOC7A)
+  BSP_IO_PORT_03_PIN_03,  // P303 - DPO6 (GTIOC7B)
+  BSP_IO_PORT_03_PIN_02,  // P302 - DPO7 (GTIOC4A)
+  BSP_IO_PORT_03_PIN_01   // P301 - DPO8 (GTIOC4B)
 };
-const char* DIGITAL_OUT_PORT_NAMES[] = {"P408", "P409", "P410", "P411", "P302", "P301", "P300", "P108"};
+const char* DIGITAL_OUT_PORT_NAMES[] = {"P408", "P409", "P410", "P411", "P304", "P303", "P302", "P301"};
 const int NUM_DIGITAL_OUT = 8;
 
 // ADC Configuration
@@ -72,15 +154,16 @@ const uint16_t DEFAULT_RX_BASE_ID = 0x640;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
-const uint8_t FW_VERSION = 0x06;
+const uint8_t FW_VERSION = 0x07;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
 // Set to 0xFF to invert all outputs, or set bits per-channel as needed.
-const uint8_t OUTPUT_STAGE_INVERT_MASK = 0xFF;
+const uint8_t OUTPUT_STAGE_INVERT_MASK = 0x00;
 
-// NeoPixel
-const uint8_t BRIGHTNESS = 26; // 10% of 255
+// Digital input duty polarity.
+// Bit=1 means DI duty is reported as low-time (active LOW).
+const uint8_t DI_ACTIVE_LOW_MASK = 0xFF;
 
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
@@ -119,9 +202,10 @@ uint32_t adcScanFailCount = 0;
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
 uint16_t outputFreq[NUM_DIGITAL_OUT];
-uint32_t lastAppliedPwmCounts[6] = {0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL,
-                                    0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL};
-uint8_t lastAppliedGpioLevel[2] = {0xFFU, 0xFFU};
+uint32_t lastAppliedPwmCounts[NUM_DIGITAL_OUT] = {
+  0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL,
+  0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL
+};
 
 uint32_t diTimerFreq[NUM_DIGITAL_IN];
 
@@ -172,16 +256,18 @@ FspTimer gpt1; // DI2/DI3
 FspTimer gpt2; // DI1/DI6
 FspTimer gpt3; // DI7/DI8
 
-// Hardware PWM output timers (GPT4, GPT5, GPT6)
-FspTimer gpt4_out;  // DPO5-6  (GTIOC4A/4B)
+// Hardware PWM output timers (GPT4, GPT5, GPT6, GPT7)
+FspTimer gpt4_out;  // DPO7-8  (GTIOC4A/4B)
 FspTimer gpt5_out;  // DPO1-2  (GTIOC5A/5B)
 FspTimer gpt6_out;  // DPO3-4  (GTIOC6A/6B)
+FspTimer gpt7_out;  // DPO5-6  (GTIOC7A/7B)
 uint32_t gpt4PeriodCounts = 0;
 uint32_t gpt5PeriodCounts = 0;
 uint32_t gpt6PeriodCounts = 0;
-// Last applied output frequency per GPT pair (0=GPT5/DPO1-2, 1=GPT6/DPO3-4, 2=GPT4/DPO5-6)
+uint32_t gpt7PeriodCounts = 0;
+// Last applied output frequency per GPT pair (0=GPT5/DPO1-2, 1=GPT6/DPO3-4, 2=GPT7/DPO5-6, 3=GPT4/DPO7-8)
 // Initialised to 0 so any non-zero loaded frequency triggers an update on first applyOutputs()
-uint16_t lastAppliedOutputFreqHz[3] = {0, 0, 0};
+uint16_t lastAppliedOutputFreqHz[4] = {0, 0, 0, 0};
 
 struct CaptureCtx {
   uint8_t idxA;
@@ -202,6 +288,17 @@ static uint32_t diffCounts(uint32_t now, uint32_t prev, uint32_t maxCounts) {
     return now - prev;
   }
   return (maxCounts - prev) + now + 1;
+}
+
+static uint32_t diActiveCounts(uint8_t index, uint32_t periodCounts, uint32_t highCounts) {
+  if (periodCounts == 0U) {
+    return 0U;
+  }
+  if (highCounts > periodCounts) {
+    highCounts = periodCounts;
+  }
+  bool activeLow = ((DI_ACTIVE_LOW_MASK >> index) & 0x01U) != 0U;
+  return activeLow ? (periodCounts - highCounts) : highCounts;
 }
 
 static bool readDigitalIn(uint8_t index) {
@@ -452,16 +549,16 @@ static void loadConfig() {
 
 static uint32_t modeColor(uint8_t mode) {
   switch (mode) {
-    case 0: return neopixel.Color(0, 150, 0);      // Green
-    case 1: return neopixel.Color(150, 150, 0);    // Yellow
-    case 2: return neopixel.Color(150, 150, 0);    // Yellow
-    case 3: return neopixel.Color(150, 150, 0);    // Yellow
-    case 4: return neopixel.Color(80, 120, 150);   // BluishYellow
-    case 5: return neopixel.Color(80, 120, 150);   // BluishYellow
-    case 6: return neopixel.Color(150, 80, 0);     // Amber
-    case 7: return neopixel.Color(150, 0, 0);      // Red
-    case 8: return neopixel.Color(0, 0, 150);      // Blue
-    default: return neopixel.Color(150, 0, 150);   // Violet
+    case 0: return makeNeoColor(0, 150, 0);      // Green
+    case 1: return makeNeoColor(150, 150, 0);    // Yellow
+    case 2: return makeNeoColor(150, 150, 0);    // Yellow
+    case 3: return makeNeoColor(150, 150, 0);    // Yellow
+    case 4: return makeNeoColor(80, 120, 150);   // BluishYellow
+    case 5: return makeNeoColor(80, 120, 150);   // BluishYellow
+    case 6: return makeNeoColor(150, 80, 0);     // Amber
+    case 7: return makeNeoColor(150, 0, 0);      // Red
+    case 8: return makeNeoColor(0, 0, 150);      // Blue
+    default: return makeNeoColor(150, 0, 150);   // Violet
   }
 }
 
@@ -469,11 +566,10 @@ static void updateStatusLed(uint32_t nowMs) {
   bool canSilent = (lastCanRxMs == 0) ? (nowMs > config.rxTimeoutMs) : (nowMs - lastCanRxMs > config.rxTimeoutMs);
   if (canSilent) {
     bool on = ((nowMs / 250) % 2) == 0;
-    neopixel.setPixelColor(0, on ? neopixel.Color(0, 0, 150) : neopixel.Color(0, 0, 0));
+    neopixelShowPacked(on ? makeNeoColor(0, 0, 150) : makeNeoColor(0, 0, 0));
   } else {
-    neopixel.setPixelColor(0, modeColor(config.canMode));
+    neopixelShowPacked(modeColor(config.canMode));
   }
-  neopixel.show();
 }
 
 static void captureCallback(timer_callback_args_t *p_args) {
@@ -669,7 +765,7 @@ static void reinitOutputTimer(FspTimer &timer, uint8_t gptChannel,
   cachedCounts1 = 0xFFFFFFFFUL;
 }
 
-// Apply output values using hardware PWM (GPT4, GPT5, GPT6) and GPIO
+// Apply output values using hardware PWM (GPT4-GPT7)
 void applyOutputs(bool useSafeState) {
   uint8_t newDuty[NUM_DIGITAL_OUT];
 
@@ -691,7 +787,8 @@ void applyOutputs(bool useSafeState) {
   // Update hardware PWM frequency per GPT pair when it has changed.
   // Each GPT timer drives two outputs that share the same period register.
   // Use the even-indexed channel of each pair as the authoritative frequency.
-  //   GPT5 → DPO1-2 (outputFreq[0]), GPT6 → DPO3-4 (outputFreq[2]), GPT4 → DPO5-6 (outputFreq[4])
+  //   GPT5 → DPO1-2 (outputFreq[0]), GPT6 → DPO3-4 (outputFreq[2]),
+  //   GPT7 → DPO5-6 (outputFreq[4]), GPT4 → DPO7-8 (outputFreq[6])
   if (gpt5_out.is_opened() && outputFreq[0] != lastAppliedOutputFreqHz[0]) {
     if (rxDebug) {
       Serial.print("[FREQ GPT5 "); Serial.print(lastAppliedOutputFreqHz[0]);
@@ -708,18 +805,27 @@ void applyOutputs(bool useSafeState) {
     reinitOutputTimer(gpt6_out, 6, gpt6PeriodCounts, lastAppliedPwmCounts[2], lastAppliedPwmCounts[3]);
     lastAppliedOutputFreqHz[1] = outputFreq[2];
   }
-  if (gpt4_out.is_opened() && outputFreq[4] != lastAppliedOutputFreqHz[2]) {
+  if (gpt7_out.is_opened() && outputFreq[4] != lastAppliedOutputFreqHz[2]) {
     if (rxDebug) {
-      Serial.print("[FREQ GPT4 "); Serial.print(lastAppliedOutputFreqHz[2]);
+      Serial.print("[FREQ GPT7 "); Serial.print(lastAppliedOutputFreqHz[2]);
       Serial.print("->"); Serial.print(outputFreq[4]); Serial.println("Hz]");
     }
-    reinitOutputTimer(gpt4_out, 4, gpt4PeriodCounts, lastAppliedPwmCounts[4], lastAppliedPwmCounts[5]);
+    reinitOutputTimer(gpt7_out, 7, gpt7PeriodCounts, lastAppliedPwmCounts[4], lastAppliedPwmCounts[5]);
     lastAppliedOutputFreqHz[2] = outputFreq[4];
   }
+  if (gpt4_out.is_opened() && outputFreq[6] != lastAppliedOutputFreqHz[3]) {
+    if (rxDebug) {
+      Serial.print("[FREQ GPT4 "); Serial.print(lastAppliedOutputFreqHz[3]);
+      Serial.print("->"); Serial.print(outputFreq[6]); Serial.println("Hz]");
+    }
+    reinitOutputTimer(gpt4_out, 4, gpt4PeriodCounts, lastAppliedPwmCounts[6], lastAppliedPwmCounts[7]);
+    lastAppliedOutputFreqHz[3] = outputFreq[6];
+  }
 
-  // Update hardware PWM using set_duty_cycle
-  // set_duty_cycle expects counts 0..period, so scale from 0-255
-  // Cap max to period-1 to ensure compare logic works properly
+  // Update hardware PWM using set_duty_cycle.
+  // On this RA4M1 GPT setup, the compare value maps to low-time, so convert
+  // logical duty to compare counts with (255 - duty).
+  // Cap max to period-1 to ensure compare logic works properly.
   
   // Channels 0-1: GPT5 (DPO1-2, GTIOC5B/5A)
   if (gpt5_out.is_opened()) {
@@ -731,8 +837,8 @@ void applyOutputs(bool useSafeState) {
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts0 = (period * (uint32_t)newDuty[0]) / 255;
-    uint32_t counts1 = (period * (uint32_t)newDuty[1]) / 255;
+    uint32_t counts0 = (period * (uint32_t)(255U - newDuty[0])) / 255U;
+    uint32_t counts1 = (period * (uint32_t)(255U - newDuty[1])) / 255U;
     if (counts0 >= period) counts0 = period - 1;
     if (counts1 >= period) counts1 = period - 1;
       if (lastAppliedPwmCounts[0] != counts0) {
@@ -757,8 +863,8 @@ void applyOutputs(bool useSafeState) {
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts2 = (period * (uint32_t)newDuty[2]) / 255;
-    uint32_t counts3 = (period * (uint32_t)newDuty[3]) / 255;
+    uint32_t counts2 = (period * (uint32_t)(255U - newDuty[2])) / 255U;
+    uint32_t counts3 = (period * (uint32_t)(255U - newDuty[3])) / 255U;
     if (counts2 >= period) counts2 = period - 1;
     if (counts3 >= period) counts3 = period - 1;
     if (lastAppliedPwmCounts[2] != counts2) {
@@ -773,7 +879,33 @@ void applyOutputs(bool useSafeState) {
     }
   }
 
-  // Channels 4-5: GPT4 (DPO5-6, GTIOC4A/4B)
+  // Channels 4-5: GPT7 (DPO5-6, GTIOC7A/7B)
+  if (gpt7_out.is_opened()) {
+    uint32_t period = gpt7PeriodCounts;
+    if (period < 2U) {
+      period = gpt7_out.get_period_raw();
+      gpt7PeriodCounts = period;
+    }
+    if (period < 2U) {
+      period = 2U;
+    }
+    uint32_t counts4 = (period * (uint32_t)(255U - newDuty[4])) / 255U;
+    uint32_t counts5 = (period * (uint32_t)(255U - newDuty[5])) / 255U;
+    if (counts4 >= period) counts4 = period - 1;
+    if (counts5 >= period) counts5 = period - 1;
+    if (lastAppliedPwmCounts[4] != counts4) {
+      if (rxDebug) { Serial.print("[PWM DPO5 "); Serial.print(lastAppliedPwmCounts[4]); Serial.print("->"); Serial.print(counts4); Serial.println("]"); }
+      gpt7_out.set_duty_cycle(counts4, CHANNEL_A);  // DPO5
+      lastAppliedPwmCounts[4] = counts4;
+    }
+    if (lastAppliedPwmCounts[5] != counts5) {
+      if (rxDebug) { Serial.print("[PWM DPO6 "); Serial.print(lastAppliedPwmCounts[5]); Serial.print("->"); Serial.print(counts5); Serial.println("]"); }
+      gpt7_out.set_duty_cycle(counts5, CHANNEL_B);  // DPO6
+      lastAppliedPwmCounts[5] = counts5;
+    }
+  }
+
+  // Channels 6-7: GPT4 (DPO7-8, GTIOC4A/4B)
   if (gpt4_out.is_opened()) {
     uint32_t period = gpt4PeriodCounts;
     if (period < 2U) {
@@ -783,33 +915,20 @@ void applyOutputs(bool useSafeState) {
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts4 = (period * (uint32_t)newDuty[4]) / 255;
-    uint32_t counts5 = (period * (uint32_t)newDuty[5]) / 255;
-    if (counts4 >= period) counts4 = period - 1;
-    if (counts5 >= period) counts5 = period - 1;
-    if (lastAppliedPwmCounts[4] != counts4) {
-      if (rxDebug) { Serial.print("[PWM DPO5 "); Serial.print(lastAppliedPwmCounts[4]); Serial.print("->"); Serial.print(counts4); Serial.println("]"); }
-      gpt4_out.set_duty_cycle(counts4, CHANNEL_A);  // DPO5
-      lastAppliedPwmCounts[4] = counts4;
+    uint32_t counts6 = (period * (uint32_t)(255U - newDuty[6])) / 255U;
+    uint32_t counts7 = (period * (uint32_t)(255U - newDuty[7])) / 255U;
+    if (counts6 >= period) counts6 = period - 1;
+    if (counts7 >= period) counts7 = period - 1;
+    if (lastAppliedPwmCounts[6] != counts6) {
+      if (rxDebug) { Serial.print("[PWM DPO7 "); Serial.print(lastAppliedPwmCounts[6]); Serial.print("->"); Serial.print(counts6); Serial.println("]"); }
+      gpt4_out.set_duty_cycle(counts6, CHANNEL_A);  // DPO7
+      lastAppliedPwmCounts[6] = counts6;
     }
-    if (lastAppliedPwmCounts[5] != counts5) {
-      if (rxDebug) { Serial.print("[PWM DPO6 "); Serial.print(lastAppliedPwmCounts[5]); Serial.print("->"); Serial.print(counts5); Serial.println("]"); }
-      gpt4_out.set_duty_cycle(counts5, CHANNEL_B);  // DPO6
-      lastAppliedPwmCounts[5] = counts5;
+    if (lastAppliedPwmCounts[7] != counts7) {
+      if (rxDebug) { Serial.print("[PWM DPO8 "); Serial.print(lastAppliedPwmCounts[7]); Serial.print("->"); Serial.print(counts7); Serial.println("]"); }
+      gpt4_out.set_duty_cycle(counts7, CHANNEL_B);  // DPO8
+      lastAppliedPwmCounts[7] = counts7;
     }
-  }
-
-  // Channels 6-7: GPIO (DPO7-8, P300/P108)
-  // These outputs are active-low at the pin, so logical ON drives LOW.
-  uint8_t gpio6Level = (newDuty[6] > 127) ? 0U : 1U;
-  uint8_t gpio7Level = (newDuty[7] > 127) ? 0U : 1U;
-  if (lastAppliedGpioLevel[0] != gpio6Level) {
-    writeGpioOutput(DIGITAL_OUT_PINS[6], gpio6Level != 0U);
-    lastAppliedGpioLevel[0] = gpio6Level;
-  }
-  if (lastAppliedGpioLevel[1] != gpio7Level) {
-    writeGpioOutput(DIGITAL_OUT_PINS[7], gpio7Level != 0U);
-    lastAppliedGpioLevel[1] = gpio7Level;
   }
 }
 
@@ -1017,15 +1136,18 @@ static void sendTxFrames() {
     uint32_t timerFreq0 = diTimerFreq[baseIndex];
     uint32_t timerFreq1 = diTimerFreq[baseIndex + 1];
 
+    uint32_t dutyCounts0 = diActiveCounts(baseIndex, period0, high0);
+    uint32_t dutyCounts1 = diActiveCounts(static_cast<uint8_t>(baseIndex + 1U), period1, high1);
+
     canModeBuildTxDiPairFrame(config.canMode,
                               baseId,
                               timerFreq0,
                               period0,
-                              high0,
+                  dutyCounts0,
                               has0,
                               timerFreq1,
                               period1,
-                              high1,
+                  dutyCounts1,
                               has1,
                               frame);
     if (frame.len > 0) {
@@ -1119,13 +1241,15 @@ static void printDiag() {
   }
 
   // Hardware PWM diagnostics
-  Serial.println("--- HW PWM (GPT4/5/6) ---");
+  Serial.println("--- HW PWM (GPT4/5/6/7) ---");
   Serial.print("GPT4 open="); Serial.print(gpt4_out.is_opened() ? "YES" : "NO");
   Serial.print(" period="); Serial.print(gpt4_out.is_opened() ? gpt4_out.get_period_raw() : 0);
   Serial.print("  GPT5 open="); Serial.print(gpt5_out.is_opened() ? "YES" : "NO");
   Serial.print(" period="); Serial.print(gpt5_out.is_opened() ? gpt5_out.get_period_raw() : 0);
   Serial.print("  GPT6 open="); Serial.print(gpt6_out.is_opened() ? "YES" : "NO");
-  Serial.print(" period="); Serial.println(gpt6_out.is_opened() ? gpt6_out.get_period_raw() : 0);
+  Serial.print(" period="); Serial.print(gpt6_out.is_opened() ? gpt6_out.get_period_raw() : 0);
+  Serial.print("  GPT7 open="); Serial.print(gpt7_out.is_opened() ? "YES" : "NO");
+  Serial.print(" period="); Serial.println(gpt7_out.is_opened() ? gpt7_out.get_period_raw() : 0);
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
     uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
@@ -1179,7 +1303,7 @@ static void printHelp() {
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
-  Serial.println("  OUTFREQ <ch> <hz>       - Set output channel PWM frequency (1-8)");
+  Serial.println("  OUTFREQ <ch> <hz>       - Set pair PWM freq via channel (1-8): 1-2/GPT5, 3-4/GPT6, 5-6/GPT7, 7-8/GPT4");
   Serial.println("  CONFIG                 - Print stored configuration");
   Serial.println("  SERIALOVERRIDE <mask>  - Set serial override mask (0x00-0xFF)");
   Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-8)");
@@ -1269,7 +1393,8 @@ static void printStatusOnce() {
       Serial.print(freq, 1);
       Serial.print(" Hz  duty=");
       if (hasH) {
-        float duty = (static_cast<float>(high) / static_cast<float>(period)) * 100.0f;
+        uint32_t activeCounts = diActiveCounts(static_cast<uint8_t>(i), period, high);
+        float duty = (static_cast<float>(activeCounts) / static_cast<float>(period)) * 100.0f;
         Serial.print(duty, 1);
         Serial.print("%");
       } else {
@@ -1287,7 +1412,7 @@ static void printStatusOnce() {
   Serial.println();
   Serial.println("--- Digital Outputs (Hardware PWM) ---");
   Serial.print("HW_PWM=");
-  Serial.print((gpt4_out.is_opened() && gpt5_out.is_opened() && gpt6_out.is_opened()) ? "OK" : "ERR");
+  Serial.print((gpt4_out.is_opened() && gpt5_out.is_opened() && gpt6_out.is_opened() && gpt7_out.is_opened()) ? "OK" : "ERR");
   Serial.print("  lastRxMs=");
   Serial.print(lastCanRxMs);
   Serial.print("  now=");
@@ -1313,14 +1438,16 @@ static void printStatusOnce() {
     Serial.print("  safe=");
     Serial.print(safeOn ? "ON " : "OFF");
     Serial.print("  drv=");
-    if (i < 2) {
-      Serial.print("GPT5");
-    } else if (i < 4) {
-      Serial.print("GPT6");
-    } else if (i < 6) {
-      Serial.print("GPT4");
-    } else {
-      Serial.print("GPIO");
+    switch (i) {
+      case 0: Serial.print("GPT5B"); break;  // DPO1 -> P408
+      case 1: Serial.print("GPT5A"); break;  // DPO2 -> P409
+      case 2: Serial.print("GPT6B"); break;  // DPO3 -> P410
+      case 3: Serial.print("GPT6A"); break;  // DPO4 -> P411
+      case 4: Serial.print("GPT7A"); break;  // DPO5 -> P304
+      case 5: Serial.print("GPT7B"); break;  // DPO6 -> P303
+      case 6: Serial.print("GPT4A"); break;  // DPO7 -> P302
+      case 7: Serial.print("GPT4B"); break;  // DPO8 -> P301
+      default: Serial.print("--"); break;
     }
     Serial.println();
   }
@@ -1359,16 +1486,16 @@ static void printConfig() {
   Serial.print("DI Debounce: ");
   Serial.print(getDiDebounceMs());
   Serial.println(" ms");
-  Serial.print("Out Freq Pair 1: ");
+  Serial.print("Out Freq Pair 1 (DPO1-2, GPT5): ");
   Serial.print(config.outFreqHz[0]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 2: ");
+  Serial.print("Out Freq Pair 2 (DPO3-4, GPT6): ");
   Serial.print(config.outFreqHz[1]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 3: ");
+  Serial.print("Out Freq Pair 3 (DPO5-6, GPT7): ");
   Serial.print(config.outFreqHz[2]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 4: ");
+  Serial.print("Out Freq Pair 4 (DPO7-8, GPT4): ");
   Serial.print(config.outFreqHz[3]);
   Serial.println(" Hz");
   Serial.print("CRC: 0x");
@@ -1424,7 +1551,7 @@ static void handleSerial() {
       uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
       DeviceState state = {
         adcBuf[readBuf], NUM_ANALOG,
-        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
@@ -1445,7 +1572,7 @@ static void handleSerial() {
       uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
       DeviceState state = {
         adcBuf[readBuf], NUM_ANALOG,
-        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
@@ -1800,18 +1927,15 @@ static void handleSerial() {
   Serial.println("ERR: Unknown command. Type HELP");
 }
 
-// Initialize hardware PWM using GPT4, GPT5, GPT6 for 6 channels + GPIO for 2 channels
+// Initialize hardware PWM using GPT4-GPT7 for all 8 digital outputs
 static void initHardwarePwm() {
-  // Configure output pin modes
-  configureGpioOutput(DIGITAL_OUT_PINS[6], false);  // DPO7 - GPIO only
-  configureGpioOutput(DIGITAL_OUT_PINS[7], false);  // DPO8 - GPIO only
-
   // Use per-pair frequencies already loaded from config into outputFreq[].
   // Pairs: DPO1-2 → outputFreq[0] (GPT5), DPO3-4 → outputFreq[2] (GPT6),
-  //        DPO5-6 → outputFreq[4] (GPT4).
+  //        DPO5-6 → outputFreq[4] (GPT7), DPO7-8 → outputFreq[6] (GPT4).
   uint32_t freqGpt5 = outputFreq[0];
   uint32_t freqGpt6 = outputFreq[2];
-  uint32_t freqGpt4 = outputFreq[4];
+  uint32_t freqGpt7 = outputFreq[4];
+  uint32_t freqGpt4 = outputFreq[6];
   
   // GPT5: Channels 0-1 (DPO1-2, P408-P409)
   configureGptPeripheral(DIGITAL_OUT_PINS[0]);  // P408 - DPO1
@@ -1843,25 +1967,42 @@ static void initHardwarePwm() {
   gpt6PeriodCounts = gpt6_out.get_period_raw();
   lastAppliedOutputFreqHz[1] = static_cast<uint16_t>(freqGpt6);
 
-  // GPT4: Channels 4-5 (DPO5-6, P302-P301)
-  configureGptPeripheral(DIGITAL_OUT_PINS[4]);  // P302 - DPO5
-  configureGptPeripheral(DIGITAL_OUT_PINS[5]);  // P301 - DPO6
+  // GPT7: Channels 4-5 (DPO5-6, P304-P303)
+  configureGptPeripheral(DIGITAL_OUT_PINS[4]);  // P304 - DPO5
+  configureGptPeripheral(DIGITAL_OUT_PINS[5]);  // P303 - DPO6
+  FspTimer::force_use_of_pwm_reserved_timer();
+  gpt7_out.begin(TIMER_MODE_PWM, GPT_TIMER, 7, freqGpt7, 50.0f);
+  gpt7_out.add_pwm_extended_cfg();
+  gpt7_out.enable_pwm_channel(CHANNEL_A);  // DPO5 on GTIOC7A
+  gpt7_out.enable_pwm_channel(CHANNEL_B);  // DPO6 on GTIOC7B
+  gpt7_out.open();
+  gpt7_out.set_duty_cycle(0, CHANNEL_A);  // Initialize to 0% duty
+  gpt7_out.set_duty_cycle(0, CHANNEL_B);
+  gpt7_out.start();
+  gpt7PeriodCounts = gpt7_out.get_period_raw();
+  lastAppliedOutputFreqHz[2] = static_cast<uint16_t>(freqGpt7);
+
+  // GPT4: Channels 6-7 (DPO7-8, P302-P301)
+  configureGptPeripheral(DIGITAL_OUT_PINS[6]);  // P302 - DPO7
+  configureGptPeripheral(DIGITAL_OUT_PINS[7]);  // P301 - DPO8
   FspTimer::force_use_of_pwm_reserved_timer();
   gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, freqGpt4, 50.0f);
   gpt4_out.add_pwm_extended_cfg();
-  gpt4_out.enable_pwm_channel(CHANNEL_A);  // DPO5 on GTIOC4A
-  gpt4_out.enable_pwm_channel(CHANNEL_B);  // DPO6 on GTIOC4B
+  gpt4_out.enable_pwm_channel(CHANNEL_A);  // DPO7 on GTIOC4A
+  gpt4_out.enable_pwm_channel(CHANNEL_B);  // DPO8 on GTIOC4B
   gpt4_out.open();
   gpt4_out.set_duty_cycle(0, CHANNEL_A);  // Initialize to 0% duty
   gpt4_out.set_duty_cycle(0, CHANNEL_B);
   gpt4_out.start();
   gpt4PeriodCounts = gpt4_out.get_period_raw();
-  lastAppliedOutputFreqHz[2] = static_cast<uint16_t>(freqGpt4);
+  lastAppliedOutputFreqHz[3] = static_cast<uint16_t>(freqGpt4);
 
   Serial.print("[HW PWM] GPT5=");
   Serial.print(freqGpt5);
   Serial.print("Hz GPT6=");
   Serial.print(freqGpt6);
+  Serial.print("Hz GPT7=");
+  Serial.print(freqGpt7);
   Serial.print("Hz GPT4=");
   Serial.print(freqGpt4);
   Serial.println("Hz");
@@ -1930,10 +2071,9 @@ void setup() {
 
   initHardwarePwm();
 
-  // Initialize NeoPixel
-  neopixel.begin();
-  neopixel.setBrightness(BRIGHTNESS);
-  neopixel.show();
+  // Initialize NeoPixel (raw P400 driver)
+  neopixelInitRaw();
+  neopixelShowPacked(makeNeoColor(0, 0, 0));
 
   // Initialize CAN before capture inputs so that CAN.begin()'s IRQManager
   // allocations don't overwrite IELSR slots that the GPT capture timers need.
@@ -2058,7 +2198,7 @@ void loop() {
       uint8_t readBuf = (adcActiveBuf == 0) ? 1 : 0;
       DeviceState state = {
         adcBuf[readBuf], NUM_ANALOG,
-        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN,
+        diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,

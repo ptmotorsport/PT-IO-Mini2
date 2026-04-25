@@ -46,6 +46,7 @@ struct DeviceState {
   volatile const bool* diHasPeriod;
   volatile const bool* diHasHigh;
   uint8_t numDigitalIn;
+  uint8_t diActiveLowMask;
   
   // Digital outputs
   const uint8_t* outputDuty;

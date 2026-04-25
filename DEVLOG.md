@@ -15,7 +15,7 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 ### What Works
 - **8× Analog inputs** — 14-bit ADC, all channels working
 - **8× Digital inputs** — GPT input capture, frequency + duty cycle measurement (overflow-aware), configurable debounce (0-100ms)
-- **8× Digital outputs** — Hardware GPT PWM (GPT4/5/6) + GPIO, per-pair frequency configurable at runtime
+- **8× Digital outputs** — Hardware GPT PWM on GPT4/5/6/7 (all 8 channels), per-pair frequency configurable at runtime
 - **CAN bus** — TX/RX with configurable IDs, rates, timeout-based safe state
 - **USB CDC serial CLI** — Full command set (STATUS, DIAG, OUT, CONFIG, DEFAULTS, etc.)
 - **USB CDC JSON protocol** — 14 commands for GUI applications, telemetry streaming, device auto-discovery
@@ -26,7 +26,6 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ### Known Issues (Prototype Only — Fixed in Rev 2 Pinout)
 - **DI5 (P107/GPT0A)**: Intermittent capture — init ordering fix applied (initCaptureInputs runs last), may still need verification on new hardware
-- **DPO7/DPO8 (P300/P108)**: SWD debug pins with no GPT peripheral — GPIO only (no PWM). Rev 2 moves to P303/P304 (GPT7)
 - **Output frequency pairs**: GPT4-7 A/B share frequency — 4 independent freq groups, not 8. Acceptable trade-off for hardware PWM resolution
 
 ### Fixed Bugs (March 2026)
@@ -38,6 +37,26 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 ---
 
 ## Version History
+
+### v0.0.7 (April 2026)
+**Rev 2 Pinout + Polarity + Monitor Alignment**
+
+- Updated firmware pin mapping to match Rev 2 hardware pinout:
+  DI: `P501, P104, P105, P106, P107, P113, P112, P111`
+  DPO: `P408, P409, P410, P411, P304, P303, P302, P301`
+  NeoPixel moved to `P400` (UNO R4 variant pin 26)
+- Upgraded output path from mixed PWM/GPIO to full hardware PWM for all outputs:
+  `DPO1-2 -> GPT5`, `DPO3-4 -> GPT6`, `DPO5-6 -> GPT7`, `DPO7-8 -> GPT4`
+- Set output stage inversion default for current board wiring:
+  `OUTPUT_STAGE_INVERT_MASK = 0x00`
+- Fixed PWM endpoint polarity behavior (0%/100%) by correcting compare mapping used in `set_duty_cycle()` conversion.
+- Fixed DI duty reporting polarity so reported duty reflects **active duty** (active-low by default):
+  Added `DI_ACTIVE_LOW_MASK` and applied it to STATUS output, JSON telemetry, and CAN DI duty frames.
+- Updated serial monitor/help/config text so displayed driver/GPT mapping matches the actual pinout and timer allocation.
+
+Validation on hardware:
+- Frequency loopback DPO -> DI verified.
+- Duty polarity validated with LED + DI readback after fixes.
 
 ### v0.0.6 (April 2026)
 **JSON Protocol & Per-Channel Override**
@@ -139,12 +158,28 @@ Uninitialized EEPROM contains arbitrary values. Always validate loaded config:
 
 ## Rev 2 Hardware Changes
 
-Only 2 pins change from the prototype. See `PINOUT.md` for full details.
+Rev 2 introduces a broader digital I/O remap (DI + DPO) and moves NeoPixel to `P400`.
+See `PINOUT.md` for the full authoritative mapping.
 
 | Signal | Rev 1 | Rev 2 | Why |
 |--------|-------|-------|-----|
-| DPO7 | P300 (SWCLK) | P303 (GPT7B) | Gets hardware PWM, frees SWD |
-| DPO8 | P108 (SWDIO) | P304 (GPT7A) | Gets hardware PWM, frees SWD |
+| DI1 | P107 | P501 | Updated Rev 2 routing |
+| DI2 | P106 | P104 | Updated Rev 2 routing |
+| DI3 | P105 | P105 | unchanged |
+| DI4 | P104 | P106 | Updated Rev 2 routing |
+| DI5 | P113 | P107 | Updated Rev 2 routing |
+| DI6 | P501 | P113 | Updated Rev 2 routing |
+| DI7 | P111 | P112 | Updated Rev 2 routing |
+| DI8 | P112 | P111 | Updated Rev 2 routing |
+| DPO1 | P302 | P408 | Updated Rev 2 routing |
+| DPO2 | P301 | P409 | Updated Rev 2 routing |
+| DPO3 | P408 | P410 | Updated Rev 2 routing |
+| DPO4 | P409 | P411 | Updated Rev 2 routing |
+| DPO5 | P410 | P304 | Updated Rev 2 routing |
+| DPO6 | P411 | P303 | Updated Rev 2 routing |
+| DPO7 | P303 | P302 | Updated Rev 2 routing |
+| DPO8 | P304 | P301 | Updated Rev 2 routing |
+| NeoPixel | P109 | P400 | Better routing / board fit |
 
 ---
 

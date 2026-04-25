@@ -95,6 +95,7 @@ void sendJsonTelemetry(const DeviceState& state) {
   for (uint8_t i = 0; i < state.numDigitalIn; i++) {
     JsonObject di = digital.createNestedObject();
     di["state"] = state.digitalInStates[i];
+    bool activeLow = ((state.diActiveLowMask >> i) & 0x01U) != 0U;
     
     if (state.diHasPeriod[i] && state.diTimerFreq[i] > 0 && state.diPeriodCounts[i] > 0) {
       // Calculate frequency in Hz
@@ -103,7 +104,13 @@ void sendJsonTelemetry(const DeviceState& state) {
       
       // Calculate duty cycle percentage
       if (state.diHasHigh[i]) {
-        float dutyPct = (static_cast<float>(state.diHighCounts[i]) / static_cast<float>(state.diPeriodCounts[i])) * 100.0f;
+        uint32_t periodCounts = state.diPeriodCounts[i];
+        uint32_t highCounts = state.diHighCounts[i];
+        if (highCounts > periodCounts) {
+          highCounts = periodCounts;
+        }
+        uint32_t activeCounts = activeLow ? (periodCounts - highCounts) : highCounts;
+        float dutyPct = (static_cast<float>(activeCounts) / static_cast<float>(periodCounts)) * 100.0f;
         di["duty"] = serialized(String(dutyPct, 1));  // 1 decimal place
       } else {
         di["duty"] = nullptr;
