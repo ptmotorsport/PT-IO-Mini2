@@ -29,10 +29,15 @@ static uint8_t clampU8(uint32_t value) {
 
 static constexpr uint32_t HALTECH_DPO_CONTROL_ID = 0x6A8;
 static constexpr uint32_t HALTECH_DPO_CONFIG_ID = 0x6A9;
-static constexpr uint32_t HALTECH_AVI_STATUS_ID = 0x330;
+static constexpr uint32_t HALTECH_AVI_STATUS_ID_1 = 0x330;
+static constexpr uint32_t HALTECH_AVI_STATUS_ID_2 = 0x331;
 static constexpr uint32_t HALTECH_SPI_STATUS_ID_1 = 0x332;
 static constexpr uint32_t HALTECH_SPI_STATUS_ID_2 = 0x333;
 static constexpr uint8_t HALTECH_MUX_ID_DPO = 2;
+static constexpr uint8_t HALTECH_MUX_ID_SPI = 3;
+static constexpr uint8_t HALTECH_MUX_ID_DPI = 5;
+static constexpr uint32_t HALTECH_IO16_BASE_ID_A = 0x6A8;
+static constexpr uint32_t HALTECH_IO16_BASE_ID_B = 0x6B0;
 
 static constexpr uint32_t IO12_AVI_TX_ID_A = 0x2C0;
 static constexpr uint32_t IO12_DPI_TX_ID_1_A = 0x2C2;
@@ -50,11 +55,24 @@ struct Io12TxState {
   bool mode3Toggle;
 };
 
+struct Io16TxState {
+  uint8_t digitalInMask;
+  uint16_t spiFreqHz[4];
+  uint16_t spiDutyTenths[4];
+  uint8_t diCallIndex;
+  uint8_t currentSpiIndex;
+};
+
 static Io12TxState io12TxState = {0, 0, 0, false};
+static Io16TxState io16TxState = {0, {0, 0, 0, 0}, {0, 0, 0, 0}, 0, 0};
 
 static bool isHaltechIo16Mode(uint8_t mode) {
   return mode == CAN_MODE_HALTECH_IO16A ||
          mode == CAN_MODE_HALTECH_IO16B;
+}
+
+static uint32_t io16IdShiftForMode(uint8_t mode) {
+  return (mode == CAN_MODE_HALTECH_IO16B) ? 4U : 0U;
 }
 
 static bool isHaltechIo12Mode(uint8_t mode) {
@@ -246,15 +264,35 @@ static uint16_t haltechRawPeriodToHz(uint16_t rawPeriod) {
     return 0U;
   }
 
-  // Haltech IO mode uses an odd scaled period/frequency field rather than direct Hz.
-  // The reference sketch scales frequency as quarter-Hz for one SPI status path.
-  // For output PWM control we decode this field to a usable Hz approximation.
-  // Current mapping assumes 4 raw counts = 1 Hz.
-  uint32_t hz = static_cast<uint32_t>(rawPeriod) / 4UL;
-  if (hz == 0UL) {
-    hz = 1UL;
+  // Haltech IO16 mode uses direct Hz for output PWM control.
+  // The raw period value is already in Hz, so use it directly.
+  return rawPeriod;
+}
+
+// Calculate frequency in Hz for IO16 SPI
+static uint16_t io16CalcFreqHz(uint32_t timerFreqHz,
+                               uint32_t periodCounts,
+                               bool hasPeriod) {
+  if (!hasPeriod || timerFreqHz == 0U || periodCounts == 0U) {
+    return 0U;
   }
-  return static_cast<uint16_t>(hz);
+  uint32_t hz = (timerFreqHz + (periodCounts / 2U)) / periodCounts;
+  return clampU16(hz);
+}
+
+// Calculate duty cycle in 0.1% units (1000 = 100.0%) for IO16 SPI
+static uint16_t io16CalcDutyTenths(uint32_t periodCounts,
+                                   uint32_t highCounts,
+                                   bool hasPeriod) {
+  if (!hasPeriod || periodCounts == 0U) {
+    return 0U;
+  }
+  // Calculate duty as percentage * 10
+  uint32_t dutyTenths = (highCounts * 1000UL) / periodCounts;
+  if (dutyTenths > 1000UL) {
+    dutyTenths = 1000UL;
+  }
+  return static_cast<uint16_t>(dutyTenths);
 }
 
 static void packHaltechStateAndMv(uint16_t mv, bool state, uint8_t &byteMsbState, uint8_t &byteLsb) {
@@ -654,11 +692,11 @@ static bool haltechIo16HandleRx(uint8_t mode,
                             uint8_t &safeMask,
                             uint8_t &activeMask,
                             bool &maskChanged,
+                            uint8_t &inputPullupMask,
                             bool &pullupChanged) {
   maskChanged = false;
   pullupChanged = false;
-
-  uint8_t bankStart = (mode == CAN_MODE_HALTECH_IO16B) ? 4 : 0;
+  (void)mode;
 
   if (msg.id == HALTECH_DPO_CONTROL_ID) {
     if (msg.data_length < 5) {
@@ -667,7 +705,7 @@ static bool haltechIo16HandleRx(uint8_t mode,
 
     uint8_t muxId = static_cast<uint8_t>((msg.data[0] >> 5) & 0x07);
     uint8_t muxIndex = static_cast<uint8_t>(msg.data[0] & 0x0F);
-    if (muxId != HALTECH_MUX_ID_DPO || muxIndex >= 4) {
+    if (muxId != HALTECH_MUX_ID_DPO || muxIndex >= 6) {
       return false;
     }
 
@@ -679,7 +717,7 @@ static bool haltechIo16HandleRx(uint8_t mode,
     }
     uint8_t duty255 = mapDuty1000To255(dutyRaw);
 
-    uint8_t idx = static_cast<uint8_t>(bankStart + muxIndex);
+    uint8_t idx = muxIndex;
     if (idx < 8) {
       outputDuty[idx] = duty255;
       if (hz != 0U) {
@@ -698,7 +736,7 @@ static bool haltechIo16HandleRx(uint8_t mode,
 
     uint8_t muxId = static_cast<uint8_t>((msg.data[0] >> 5) & 0x07);
     uint8_t muxIndex = static_cast<uint8_t>(msg.data[0] & 0x0F);
-    if (muxId != HALTECH_MUX_ID_DPO || muxIndex >= 4) {
+    if (muxId != HALTECH_MUX_ID_DPO || muxIndex >= 6) {
       return false;
     }
 
@@ -720,7 +758,36 @@ static bool haltechIo16HandleRx(uint8_t mode,
       activeMask = newActive;
     };
 
-    applyFlags(static_cast<uint8_t>(bankStart + muxIndex));
+    applyFlags(muxIndex);
+
+    return true;
+  }
+
+  // Handle DPI (Digital Input Pull-up) messages on Base ID + 1
+  uint32_t baseId = (mode == CAN_MODE_HALTECH_IO16B) ? HALTECH_IO16_BASE_ID_B : HALTECH_IO16_BASE_ID_A;
+  if (msg.id == (baseId + 1U)) {
+    if (msg.data_length < 2) {
+      return false;
+    }
+
+    uint8_t muxId = static_cast<uint8_t>((msg.data[0] >> 5) & 0x07);
+    uint8_t muxIndex = static_cast<uint8_t>(msg.data[0] & 0x0F);
+    if (muxId != HALTECH_MUX_ID_DPI || muxIndex >= 4) {
+      return false;
+    }
+
+    // Bits 1:1-1:2 contain pullup setting (0=disable, 1=enable)
+    uint8_t pullupBits = static_cast<uint8_t>((msg.data[1] >> 1) & 0x03);
+    bool pullupEnable = (pullupBits == 1U);
+
+    // Update the pullup mask for this DI
+    uint8_t mask = static_cast<uint8_t>(1U << muxIndex);
+    uint8_t newPullupMask = static_cast<uint8_t>((inputPullupMask & ~mask) | (pullupEnable ? mask : 0U));
+    
+    if (newPullupMask != inputPullupMask) {
+      inputPullupMask = newPullupMask;
+      pullupChanged = true;
+    }
 
     return true;
   }
@@ -732,23 +799,76 @@ static void haltechIo16BuildTxAnalogFrames(uint8_t mode,
                                            const uint16_t analogRaw14[8],
                                            ModeTxFrame &frame0,
                                            ModeTxFrame &frame1) {
-  uint8_t bankStart = (mode == CAN_MODE_HALTECH_IO16B) ? 4 : 0;
+  uint32_t shift = io16IdShiftForMode(mode);
 
-  frame0.id = HALTECH_AVI_STATUS_ID;
+  frame0.id = HALTECH_AVI_STATUS_ID_1 + shift;
   frame0.len = 8;
   memset(frame0.data, 0, sizeof(frame0.data));
 
-  frame1.id = HALTECH_SPI_STATUS_ID_1;
+  frame1.id = HALTECH_AVI_STATUS_ID_2 + shift;
   frame1.len = 8;
   memset(frame1.data, 0, sizeof(frame1.data));
 
   for (int i = 0; i < 4; i++) {
-    uint16_t mv = scaleAnalog14ToMv5000(analogRaw14[bankStart + i]);
+    uint16_t mv = scaleAnalog14ToMv5000(analogRaw14[i]);
     bool state = mv > 100U;
-
     packHaltechStateAndMv(mv, state, frame0.data[i * 2], frame0.data[i * 2 + 1]);
+  }
+
+  for (int i = 0; i < 4; i++) {
+    uint16_t mv = scaleAnalog14ToMv5000(analogRaw14[i + 4]);
+    bool state = mv > 100U;
     packHaltechStateAndMv(mv, state, frame1.data[i * 2], frame1.data[i * 2 + 1]);
   }
+}
+
+// Build multiplexed SPI status frame (Base CAN ID + 3)
+// Format per attached protocol image:
+// - Byte 0: bits[7:5]=Mux Type (3 for SPI), bits[3:0]=SPI Index (0-3)
+// - Byte 1: State (bit 0: 0=High/OFF, 1=Low/ON)
+// - Bytes 2-3: Voltage in mV (0 or 5000)
+// - Bytes 4-5: Duty cycle in 0.1% (1000 = 100.0%)
+// - Bytes 6-7: Frequency in Hz
+static void haltechIo16BuildTxSpiMuxFrame(uint8_t mode,
+                                          uint8_t spiIndex,
+                                          uint8_t digitalInMask,
+                                          uint16_t freqHz,
+                                          uint16_t dutyTenths,
+                                          ModeTxFrame &frame) {
+  if (spiIndex >= 4) {
+    frame.id = 0;
+    frame.len = 0;
+    return;
+  }
+
+  uint32_t baseId = (mode == CAN_MODE_HALTECH_IO16B) ? HALTECH_IO16_BASE_ID_B : HALTECH_IO16_BASE_ID_A;
+  
+  frame.id = baseId + 3U;
+  frame.len = 8;
+  memset(frame.data, 0, sizeof(frame.data));
+
+  // Byte 0: Mux ID (type=3 for SPI, index=0-3)
+  frame.data[0] = static_cast<uint8_t>((HALTECH_MUX_ID_SPI << 5) | (spiIndex & 0x0F));
+
+  // Get pin state: user specified 1=Low, 0=High
+  bool pinHigh = ((digitalInMask >> spiIndex) & 0x01U) != 0U;
+  bool state = !pinHigh;  // 1=Low, 0=High
+  
+  // Byte 1: State (bit 0)
+  frame.data[1] = state ? 0x01U : 0x00U;
+
+  // Bytes 2-3: Voltage in mV (5000 for high, 0 for low)
+  uint16_t mv = pinHigh ? 5000U : 0U;
+  frame.data[2] = static_cast<uint8_t>((mv >> 8) & 0xFFU);
+  frame.data[3] = static_cast<uint8_t>(mv & 0xFFU);
+
+  // Bytes 4-5: Duty cycle in 0.1% units (1000 = 100.0%)
+  frame.data[4] = static_cast<uint8_t>((dutyTenths >> 8) & 0xFFU);
+  frame.data[5] = static_cast<uint8_t>(dutyTenths & 0xFFU);
+
+  // Bytes 6-7: Frequency in Hz
+  frame.data[6] = static_cast<uint8_t>((freqHz >> 8) & 0xFFU);
+  frame.data[7] = static_cast<uint8_t>(freqHz & 0xFFU);
 }
 
 static bool haltechIo12HandleRx(uint8_t mode,
@@ -896,6 +1016,7 @@ bool canModeHandleRx(uint8_t mode,
                                  safeMask,
                                  activeMask,
                                  maskChanged,
+                                 inputPullupMask,
                                  pullupChanged);
 
     case CAN_MODE_HALTECH_IO12A:
@@ -1000,16 +1121,38 @@ void canModeBuildTxStateFrame(uint8_t mode,
   (void)activeMask;
   (void)fwVersion;
 
-  if (isHaltechIo12Mode(mode)) {
+  if (mode == CAN_MODE_HALTECH_IO12A || mode == CAN_MODE_HALTECH_IO12AB) {
     io12TxState.digitalInMask = digitalInMask;
     haltechIo12BuildKeepAliveFrame(IO12_KEEPALIVE_TX_ID_1, frame);
     return;
   }
 
-  if (isHaltechIo16Mode(mode)) {
-    frame.id = HALTECH_SPI_STATUS_ID_2;
-    frame.len = 8;
+  if (mode == CAN_MODE_HALTECH_IO12B) {
+    io12TxState.digitalInMask = digitalInMask;
+    frame.id = 0;
+    frame.len = 0;
     memset(frame.data, 0, sizeof(frame.data));
+    return;
+  }
+
+  if (isHaltechIo16Mode(mode)) {
+    // State frame is called BEFORE DiPair frames, so we can't use fresh data here.
+    // However, we can use data from the PREVIOUS TX cycle which is still valid.
+    // Just save the digital input mask and don't reinitialize the data arrays.
+    io16TxState.digitalInMask = digitalInMask;
+    io16TxState.diCallIndex = 0;
+    
+    // Send multiplexed frame for current SPI using data from previous cycle
+    uint8_t spiIndex = io16TxState.currentSpiIndex;
+    haltechIo16BuildTxSpiMuxFrame(mode, 
+                                   spiIndex,
+                                   digitalInMask,
+                                   io16TxState.spiFreqHz[spiIndex],
+                                   io16TxState.spiDutyTenths[spiIndex],
+                                   frame);
+    
+    // Advance to next SPI
+    io16TxState.currentSpiIndex = (io16TxState.currentSpiIndex + 1U) % 4U;
     return;
   }
 
@@ -1111,6 +1254,18 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
   }
 
   if (isHaltechIo16Mode(mode)) {
+    uint8_t baseIndex = static_cast<uint8_t>(io16TxState.diCallIndex * 2U);
+    if (baseIndex < 4U) {
+      // Store frequency in Hz
+      io16TxState.spiFreqHz[baseIndex] = io16CalcFreqHz(timerFreq0, period0, hasPeriod0);
+      io16TxState.spiFreqHz[baseIndex + 1U] = io16CalcFreqHz(timerFreq1, period1, hasPeriod1);
+      
+      // Store duty cycle in 0.1% units (1000 = 100.0%)
+      io16TxState.spiDutyTenths[baseIndex] = io16CalcDutyTenths(period0, high0, hasPeriod0);
+      io16TxState.spiDutyTenths[baseIndex + 1U] = io16CalcDutyTenths(period1, high1, hasPeriod1);
+    }
+    io16TxState.diCallIndex = static_cast<uint8_t>(io16TxState.diCallIndex + 1U);
+
     frame.id = 0;
     frame.len = 0;
     memset(frame.data, 0, sizeof(frame.data));
@@ -1149,15 +1304,30 @@ void canModeBuildTxStatusFrame(uint8_t mode,
   (void)txBaseId;
   (void)status;
 
-  if (isHaltechIo12Mode(mode)) {
+  if (mode == CAN_MODE_HALTECH_IO12B || mode == CAN_MODE_HALTECH_IO12AB) {
     haltechIo12BuildKeepAliveFrame(IO12_KEEPALIVE_TX_ID_2, frame);
     return;
   }
 
-  if (isHaltechIo16Mode(mode)) {
+  if (mode == CAN_MODE_HALTECH_IO12A) {
     frame.id = 0;
     frame.len = 0;
     memset(frame.data, 0, sizeof(frame.data));
+    return;
+  }
+
+  if (isHaltechIo16Mode(mode)) {
+    // Send multiplexed frame for next SPI (cycle through 0-3)
+    uint8_t spiIndex = io16TxState.currentSpiIndex;
+    haltechIo16BuildTxSpiMuxFrame(mode,
+                                   spiIndex,
+                                   io16TxState.digitalInMask,
+                                   io16TxState.spiFreqHz[spiIndex],
+                                   io16TxState.spiDutyTenths[spiIndex],
+                                   frame);
+    
+    // Advance to next SPI for next status frame call
+    io16TxState.currentSpiIndex = (io16TxState.currentSpiIndex + 1U) % 4U;
     return;
   }
 
