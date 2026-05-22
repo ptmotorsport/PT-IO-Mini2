@@ -48,6 +48,13 @@ static constexpr uint32_t IO12_KEEPALIVE_TX_ID_1 = 0x2C6;
 static constexpr uint32_t IO12_KEEPALIVE_TX_ID_2 = 0x2C7;
 static constexpr uint8_t IO12_KEEPALIVE_DATA[5] = {0x10, 0x09, 0x0D, 0x01, 0x00};
 
+static constexpr uint32_t MOTEC_E888_PWM_RX_ID_0 = 0xF3;
+static constexpr uint32_t MOTEC_E888_PWM_RX_ID_1 = 0xF7;
+static constexpr uint32_t MOTEC_E888_PWM_RX_ID_2 = 0xFB;
+static constexpr uint32_t MOTEC_E888_PWM_RX_ID_3 = 0xFF;
+static constexpr uint32_t MOTEC_E888_INPUTS_TX_ID = 0xF0;
+static constexpr uint32_t MOTEC_E888_DIAG_TX_ID = 0xF1;
+
 struct Io12TxState {
   uint8_t digitalInMask;
   uint8_t selectedBank;
@@ -63,8 +70,15 @@ struct Io16TxState {
   uint8_t currentSpiIndex;
 };
 
+struct MotecE888TxState {
+  uint8_t currentMuxIndex;
+  uint8_t digitalInMask;
+  uint16_t freqTenthsHz[4];
+};
+
 static Io12TxState io12TxState = {0, 0, 0, false};
 static Io16TxState io16TxState = {0, {0, 0, 0, 0}, {0, 0, 0, 0}, 0, 0};
+static MotecE888TxState motecE888TxState = {0, 0, {0, 0, 0, 0}};
 
 static bool isHaltechIo16Mode(uint8_t mode) {
   return mode == CAN_MODE_HALTECH_IO16A ||
@@ -293,6 +307,17 @@ static uint16_t io16CalcDutyTenths(uint32_t periodCounts,
     dutyTenths = 1000UL;
   }
   return static_cast<uint16_t>(dutyTenths);
+}
+
+// Calculate frequency for MOTEC E888 digital input channels
+static uint16_t motecE888CalcFreqTenthsHz(uint32_t timerFreqHz,
+                                           uint32_t periodCounts,
+                                           bool hasPeriod) {
+  if (!hasPeriod || timerFreqHz == 0U || periodCounts == 0U) {
+    return 0U;
+  }
+  uint32_t hz = (timerFreqHz + (periodCounts / 2U)) / periodCounts;
+  return clampU16(hz);
 }
 
 static void packHaltechStateAndMv(uint16_t mv, bool state, uint8_t &byteMsbState, uint8_t &byteLsb) {
@@ -982,6 +1007,183 @@ static void haltechIo12BuildKeepAliveFrame(uint32_t txId,
   memcpy(frame.data, IO12_KEEPALIVE_DATA, sizeof(IO12_KEEPALIVE_DATA));
 }
 
+static bool isMotecE888PwmRxId(uint32_t id) {
+  return (id == MOTEC_E888_PWM_RX_ID_0) ||
+         (id == MOTEC_E888_PWM_RX_ID_1) ||
+         (id == MOTEC_E888_PWM_RX_ID_2) ||
+         (id == MOTEC_E888_PWM_RX_ID_3);
+}
+
+static bool motecE888HandleRx(const CanMsg &msg,
+                               uint16_t defaultPwmFreqHz,
+                               uint16_t outputFreq[8],
+                               uint8_t outputDuty[8]) {
+  if (!isMotecE888PwmRxId(msg.id)) {
+    return false;
+  }
+  
+  if (msg.data_length < 8) {
+    return false;
+  }
+
+  // Byte 0 bits [7:0] = Mux index  
+  uint8_t muxIndex = msg.data[0];
+  if (muxIndex > 3) {
+    return false;
+  }
+
+  // Each mux contains 2 PWM channels
+  uint8_t baseChannel = muxIndex * 2;
+  
+  // First PWM channel (bytes 1-4)
+  uint8_t duty1 = msg.data[1];
+  uint16_t freq1 = static_cast<uint16_t>((msg.data[2] << 8) | msg.data[3]);
+  
+  // Second PWM channel (bytes 5-7 + 4)
+  uint8_t duty2 = msg.data[5];
+  uint16_t freq2 = static_cast<uint16_t>((msg.data[6] << 8) | msg.data[7]);
+  
+  // Duty: 255 = 100%, convert to 0-255 scale
+  // DBC shows: 0.3921568627 %/count which is 100/255
+  uint8_t duty1_255 = duty1;
+  uint8_t duty2_255 = duty2;
+  
+  // Frequency in Hz (direct 1:1)
+  uint16_t freq1_hz = (freq1 == 0U) ? defaultPwmFreqHz : freq1;
+  uint16_t freq2_hz = (freq2 == 0U) ? defaultPwmFreqHz : freq2;
+  
+  // Apply to output channels
+  if (baseChannel < 8) {
+    outputDuty[baseChannel] = duty1_255;
+    outputFreq[baseChannel] = freq1_hz;
+  }
+  if ((baseChannel + 1) < 8) {
+    outputDuty[baseChannel + 1] = duty2_255;
+    outputFreq[baseChannel + 1] = freq2_hz;
+  }
+  
+  return true;
+}
+
+static void motecE888BuildTxAnalogFrame(const uint16_t analogRaw14[8],
+                                         ModeTxFrame &frame) {
+  // MOTEC E888 uses multiplexed message on ID 0xF0
+  // Cycles through mux indices 0-4:
+  // m0: AV1, AV2  m1: AV3, AV4  m2: AV5, AV6  m3: AV7  m4: AV8
+  
+  uint8_t muxIndex = motecE888TxState.currentMuxIndex;
+  
+  frame.id = MOTEC_E888_INPUTS_TX_ID;
+  frame.len = 8;
+  memset(frame.data, 0, sizeof(frame.data));
+  
+  // Byte 0: bits[7:5] = mux index (3 bits at bit position 7)
+  frame.data[0] = static_cast<uint8_t>(muxIndex << 5);
+  
+  // Convert 14-bit ADC to millivolts (0-5V = 0-16383 ADC = 0-5000mV)
+  auto toMillivolts = [](uint16_t raw14) -> uint16_t {
+    uint32_t mv = (static_cast<uint32_t>(raw14) * 5000UL) / 16383UL;
+    return static_cast<uint16_t>(mv);
+  };
+  
+  switch (muxIndex) {
+    case 0: { // AV1, AV2
+      uint16_t av1 = toMillivolts(analogRaw14[0]);
+      uint16_t av2 = toMillivolts(analogRaw14[1]);
+      // AV1: at byte 0, u16 be, 13 bits (formula view shows "at byte 0")
+      // Encode as big-endian uint16 in bytes 0-1, low 13 bits significant
+      frame.data[0] |= static_cast<uint8_t>((av1 >> 8) & 0x1F);
+      frame.data[1] = static_cast<uint8_t>(av1 & 0xFF);
+      // AV2: at byte 2, s16 be (formula view shows "at byte 2")
+      // Encode as big-endian int16 in bytes 2-3
+      frame.data[2] = static_cast<uint8_t>((av2 >> 8) & 0xFF);
+      frame.data[3] = static_cast<uint8_t>(av2 & 0xFF);
+      break;
+    }
+    case 1: { // AV3, AV4
+      uint16_t av3 = toMillivolts(analogRaw14[2]);
+      uint16_t av4 = toMillivolts(analogRaw14[3]);
+      // AV3: at byte 0, u16 be, 13 bits
+      frame.data[0] |= static_cast<uint8_t>((av3 >> 8) & 0x1F);
+      frame.data[1] = static_cast<uint8_t>(av3 & 0xFF);
+      // AV4: at byte 2, s16 be
+      frame.data[2] = static_cast<uint8_t>((av4 >> 8) & 0xFF);
+      frame.data[3] = static_cast<uint8_t>(av4 & 0xFF);
+      break;
+    }
+    case 2: { // AV5, AV6
+      uint16_t av5 = toMillivolts(analogRaw14[4]);
+      uint16_t av6 = toMillivolts(analogRaw14[5]);
+      // AV5: at byte 0, u16 be, 13 bits
+      frame.data[0] |= static_cast<uint8_t>((av5 >> 8) & 0x1F);
+      frame.data[1] = static_cast<uint8_t>(av5 & 0xFF);
+      // AV6: at byte 2, s16 be
+      frame.data[2] = static_cast<uint8_t>((av6 >> 8) & 0xFF);
+      frame.data[3] = static_cast<uint8_t>(av6 & 0xFF);
+      break;
+    }
+    case 3: { // AV7, Freq1, Freq2 (DIG1, DIG2)
+      uint16_t av7 = toMillivolts(analogRaw14[6]);
+      // AV7: at byte 0, u16 be, 13 bits
+      frame.data[0] |= static_cast<uint8_t>((av7 >> 8) & 0x1F);
+      frame.data[1] = static_cast<uint8_t>(av7 & 0xFF);
+      // TC7: at byte 2, s16 be (unused, zero)
+      frame.data[2] = 0;
+      frame.data[3] = 0;
+      // Freq1: at byte 4, s16 be
+      frame.data[4] = static_cast<uint8_t>((motecE888TxState.freqTenthsHz[0] >> 8) & 0xFF);
+      frame.data[5] = static_cast<uint8_t>(motecE888TxState.freqTenthsHz[0] & 0xFF);
+      // Freq2: at byte 6, s16 be
+      frame.data[6] = static_cast<uint8_t>((motecE888TxState.freqTenthsHz[1] >> 8) & 0xFF);
+      frame.data[7] = static_cast<uint8_t>(motecE888TxState.freqTenthsHz[1] & 0xFF);
+      break;
+    }
+    case 4: { // AV8, Freq3, Freq4 (DIG3, DIG4)
+      uint16_t av8 = toMillivolts(analogRaw14[7]);
+      // AV8: at byte 0, u16 be, 13 bits
+      frame.data[0] |= static_cast<uint8_t>((av8 >> 8) & 0x1F);
+      frame.data[1] = static_cast<uint8_t>(av8 & 0xFF);
+      // TC8: at byte 2, s16 be (unused, zero)
+      frame.data[2] = 0;
+      frame.data[3] = 0;
+      // Freq3: at byte 4, s16 be
+      frame.data[4] = static_cast<uint8_t>((motecE888TxState.freqTenthsHz[2] >> 8) & 0xFF);
+      frame.data[5] = static_cast<uint8_t>(motecE888TxState.freqTenthsHz[2] & 0xFF);
+      // Freq4: at byte 6, s16 be
+      frame.data[6] = static_cast<uint8_t>((motecE888TxState.freqTenthsHz[3] >> 8) & 0xFF);
+      frame.data[7] = static_cast<uint8_t>(motecE888TxState.freqTenthsHz[3] & 0xFF);
+      break;
+    }
+  }
+  
+  // Advance to next mux index (0-4 cycle)
+  motecE888TxState.currentMuxIndex = (motecE888TxState.currentMuxIndex + 1) % 5;
+}
+
+static void motecE888BuildTxDiagFrame(uint8_t digitalInMask,
+                                       uint8_t fwVersion,
+                                       ModeTxFrame &frame) {
+  // MOTEC E888 diagnostics on ID 0xF1, mux index 0
+  // Contains digital input states (DIG1-6 only, DIG7-8 are NC)
+  
+  frame.id = MOTEC_E888_DIAG_TX_ID;
+  frame.len = 8;
+  memset(frame.data, 0, sizeof(frame.data));
+  
+  // Byte 0: bits[7:4] = mux index (0 for diagnostics with DI states)
+  frame.data[0] = 0x00; // Mux index 0
+  
+  // Digital input states: bits[48:53] (6 bits for DIG1-6)
+  // Extract first 6 bits of digitalInMask
+  uint8_t diStates = digitalInMask & 0x3F;
+  frame.data[6] = diStates;
+  
+  // Could add other diagnostics here if needed
+  // For now, keep it simple
+  
+  (void)fwVersion; // Not used in E888 diag frame
+}
+
 bool canModeHandleRx(uint8_t mode,
                      const CanMsg &msg,
                      uint16_t rxBaseId,
@@ -1046,6 +1248,14 @@ bool canModeHandleRx(uint8_t mode,
                                      pullupChanged);
 
     case CAN_MODE_MOTEC_E888:
+      (void)rxBaseId;
+      (void)safeMask;
+      (void)activeMask;
+      (void)maskChanged;
+      (void)inputPullupMask;
+      (void)pullupChanged;
+      return motecE888HandleRx(msg, defaultPwmFreqHz, outputFreq, outputDuty);
+
     case CAN_MODE_EMTRON:
     case CAN_MODE_RESERVED_9:
     case CAN_MODE_RESERVED_10:
@@ -1099,6 +1309,14 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
 
   if (mode == CAN_MODE_ECUMASTER_CANSWB_V3) {
     ecuMasterCanswbBuildTxAnalogFrames(txBaseId, analogRaw14, frame0, frame1);
+    return;
+  }
+
+  if (mode == CAN_MODE_MOTEC_E888) {
+    motecE888BuildTxAnalogFrame(analogRaw14, frame0);
+    frame1.id = 0;
+    frame1.len = 0;
+    memset(frame1.data, 0, sizeof(frame1.data));
     return;
   }
 
@@ -1177,6 +1395,12 @@ void canModeBuildTxStateFrame(uint8_t mode,
                                      activeMask,
                                      fwVersion,
                                      frame);
+    return;
+  }
+
+  if (mode == CAN_MODE_MOTEC_E888) {
+    motecE888TxState.digitalInMask = digitalInMask;
+    motecE888BuildTxDiagFrame(digitalInMask, fwVersion, frame);
     return;
   }
 
@@ -1266,6 +1490,33 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
     }
     io16TxState.diCallIndex = static_cast<uint8_t>(io16TxState.diCallIndex + 1U);
 
+    frame.id = 0;
+    frame.len = 0;
+    memset(frame.data, 0, sizeof(frame.data));
+    return;
+  }
+
+  if (mode == CAN_MODE_MOTEC_E888) {
+    // MOTEC E888 only uses DIG1-6, but frequency is only for DIG1-4
+    // Store frequency data in 0.1Hz units for first 4 digital inputs
+    // This function is called 4 times per TX cycle with pairs (DI1+DI2, DI3+DI4, DI5+DI6, DI7+DI8)
+    // We only need first 2 calls for DIG1-4
+    
+    static uint8_t diPairIndex = 0;
+    
+    if (diPairIndex == 0) {
+      // DIG1 (DI1), DIG2 (DI2)
+      motecE888TxState.freqTenthsHz[0] = motecE888CalcFreqTenthsHz(timerFreq0, period0, hasPeriod0);
+      motecE888TxState.freqTenthsHz[1] = motecE888CalcFreqTenthsHz(timerFreq1, period1, hasPeriod1);
+    } else if (diPairIndex == 1) {
+      // DIG3 (DI3), DIG4 (DI4)
+      motecE888TxState.freqTenthsHz[2] = motecE888CalcFreqTenthsHz(timerFreq0, period0, hasPeriod0);
+      motecE888TxState.freqTenthsHz[3] = motecE888CalcFreqTenthsHz(timerFreq1, period1, hasPeriod1);
+    }
+    // DIG5-6 states are captured in digitalInMask but no frequency measurement
+    
+    diPairIndex = (diPairIndex + 1) % 4;
+    
     frame.id = 0;
     frame.len = 0;
     memset(frame.data, 0, sizeof(frame.data));

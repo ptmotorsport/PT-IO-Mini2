@@ -49,7 +49,7 @@ When the device detects a serial connection (USB CDC enumeration), it automatica
 {
   "type": "hello",
   "version": 1,
-  "fw": 6,
+  "fw": 8,
   "canMode": 0,
   "canModeName": "PT_Default1",
   "capabilities": ["analog", "digital", "pwm", "can", "config"],
@@ -61,7 +61,7 @@ When the device detects a serial connection (USB CDC enumeration), it automatica
 
 **Fields:**
 - `version`: Protocol version (currently 1)
-- `fw`: Firmware version (hex, e.g., `0x06` for v0.0.6)
+- `fw`: Firmware version (hex, e.g., `0x08` for v0.0.8)
 - `canMode`: Active CAN mode ID (0-15)
 - `canModeName`: Human-readable CAN mode name
 - `capabilities`: Array of supported features
@@ -533,11 +533,11 @@ If `cmd` field is not recognized:
 
 ```
 [Device connects, sends hello]
-← {"type":"hello","version":1,"fw":6,"canMode":0,...}
+← {"type":"hello","version":1,"fw":8,"canMode":0,...}
 
 [If GUI missed hello or connected late, request it:]
 → {"cmd":"getHello"}
-← {"type":"hello","version":1,"fw":6,"canMode":0,...}
+← {"type":"hello","version":1,"fw":8,"canMode":0,...}
 
 [GUI subscribes to telemetry at 100ms]
 → {"cmd":"subscribe","stream":"telemetry","interval":100}

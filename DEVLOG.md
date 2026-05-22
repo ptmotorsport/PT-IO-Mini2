@@ -38,6 +38,17 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ## Version History
 
+### v0.0.8 (May 2026)
+**IO16 Finalization + MOTEC E888 Mode 7**
+
+- Completed HALTECH IO16 mode updates:
+  Multiplexed SPI transmission with duty cycle, corrected DI frame timing, fixed frequency scaling, and added DPI pull-up control.
+- Added MOTEC E888 CAN mode support:
+  PWM output RX handling and multiplexed input/diagnostic TX frames.
+- Corrected MOTEC E888 mappings and scaling after hardware test:
+  fixed mux index packing, analog field packing, PWM RX ID coverage (including `0xF3`), and DI frequency scaling.
+- Firmware version bumped to `v0.0.8` (`FW_VERSION = 0x08`).
+
 ### v0.0.7 (April 2026)
 **Rev 2 Pinout + Polarity + Monitor Alignment**
 
