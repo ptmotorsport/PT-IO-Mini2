@@ -6,12 +6,18 @@
 #include "r_adc.h"
 #include "FspTimer.h"
 #include "can_modes.h"
+#include "neo_modes.h"
 #include "protocol.h"
 
 // NeoPixel Configuration (raw BSP pin, not Arduino pin index)
 #define NEOPIXEL_BSP_PIN BSP_IO_PORT_04_PIN_00  // P400
-#define NEOPIXEL_COUNT 1
+#define NEOPIXEL_COUNT 26
 constexpr uint8_t NEOPIXEL_BRIGHTNESS = 26; // ~10% of 255
+
+constexpr uint8_t NEOPIXEL_MODE_INDEX = 0;
+constexpr uint8_t NEOPIXEL_AUX_START_INDEX = 1;
+
+static uint32_t neoFrame[NEOPIXEL_COUNT];
 
 // WS2812 timing (800 kHz) using DWT cycle counter on Cortex-M4.
 #define ARM_DEMCR (*((volatile uint32_t *)0xE000EDFCUL))
@@ -47,13 +53,13 @@ static void neopixelInitRaw() {
   neoMask = static_cast<uint16_t>(1U << (NEOPIXEL_BSP_PIN & 0xFFU));
 }
 
-static void neopixelShowRaw(uint8_t r, uint8_t g, uint8_t b) {
+static void neopixelShowFrame(const uint32_t *colors, uint8_t count) {
   if (neoSetReg == nullptr || neoClrReg == nullptr) {
     return;
   }
-
-  // WS2812 expects GRB byte order.
-  uint8_t bytes[3] = {scaleNeo(g), scaleNeo(r), scaleNeo(b)};
+  if (colors == nullptr || count == 0) {
+    return;
+  }
 
   constexpr uint32_t fCpu = 48000000UL;
   constexpr uint32_t cyclesT0H = fCpu / 4000000UL;  // ~0.25 us
@@ -65,21 +71,38 @@ static void neopixelShowRaw(uint8_t r, uint8_t g, uint8_t b) {
   ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
 
   uint32_t cyc = ARM_DWT_CYCCNT + cyclesBit;
-  for (uint8_t i = 0; i < 3; i++) {
-    uint8_t pix = bytes[i];
-    for (uint8_t mask = 0x80; mask != 0; mask >>= 1) {
-      while ((ARM_DWT_CYCCNT - cyc) < cyclesBit) {
-      }
-      cyc = ARM_DWT_CYCCNT;
-      *neoSetReg = neoMask;
-      if (pix & mask) {
-        while ((ARM_DWT_CYCCNT - cyc) < cyclesT1H) {
+  for (uint8_t px = 0; px < count; px++) {
+    uint32_t color = colors[px];
+    uint8_t r = static_cast<uint8_t>((color >> 16) & 0xFFU);
+    uint8_t g = static_cast<uint8_t>((color >> 8) & 0xFFU);
+    uint8_t b = static_cast<uint8_t>(color & 0xFFU);
+
+    // Keep the board mode LED brightness-capped, but do not globally scale
+    // any auxiliary LEDs so their brightness comes from the mode renderer.
+    if (px == NEOPIXEL_MODE_INDEX) {
+      r = scaleNeo(r);
+      g = scaleNeo(g);
+      b = scaleNeo(b);
+    }
+
+    // WS2812 expects GRB byte order.
+    uint8_t bytes[3] = {g, r, b};
+    for (uint8_t i = 0; i < 3; i++) {
+      uint8_t pix = bytes[i];
+      for (uint8_t mask = 0x80; mask != 0; mask >>= 1) {
+        while ((ARM_DWT_CYCCNT - cyc) < cyclesBit) {
         }
-      } else {
-        while ((ARM_DWT_CYCCNT - cyc) < cyclesT0H) {
+        cyc = ARM_DWT_CYCCNT;
+        *neoSetReg = neoMask;
+        if (pix & mask) {
+          while ((ARM_DWT_CYCCNT - cyc) < cyclesT1H) {
+          }
+        } else {
+          while ((ARM_DWT_CYCCNT - cyc) < cyclesT0H) {
+          }
         }
+        *neoClrReg = neoMask;
       }
-      *neoClrReg = neoMask;
     }
   }
   while ((ARM_DWT_CYCCNT - cyc) < cyclesBit) {
@@ -87,13 +110,6 @@ static void neopixelShowRaw(uint8_t r, uint8_t g, uint8_t b) {
 
   interrupts();
   delayMicroseconds(60);  // Latch time
-}
-
-static void neopixelShowPacked(uint32_t color) {
-  uint8_t r = static_cast<uint8_t>((color >> 16) & 0xFFU);
-  uint8_t g = static_cast<uint8_t>((color >> 8) & 0xFFU);
-  uint8_t b = static_cast<uint8_t>(color & 0xFFU);
-  neopixelShowRaw(r, g, b);
 }
 
 // Analog Input Pin Definitions (using FSP)
@@ -315,6 +331,38 @@ void setDiDebounceMs(uint8_t ms) {
   config.reserved[0] = ms;
 }
 
+uint8_t getNeoAuxMode() {
+  return config.reserved[1];
+}
+
+void setNeoAuxMode(uint8_t mode) {
+  config.reserved[1] = mode;
+}
+
+uint8_t getNeoTestExtraPixels() {
+  return neoModesGetTestExtraPixels();
+}
+
+void setNeoTestExtraPixels(uint8_t count) {
+  neoModesSetTestExtraPixels(count);
+}
+
+uint16_t getNeoTestHue() {
+  return neoModesGetTestHue();
+}
+
+uint8_t getNeoTestSat() {
+  return neoModesGetTestSat();
+}
+
+uint8_t getNeoTestLight() {
+  return neoModesGetTestLight();
+}
+
+void setNeoTestHsl(uint16_t hue, uint8_t sat, uint8_t light) {
+  neoModesSetTestHsl(hue, sat, light);
+}
+
 static void updateDigitalInDebounce(uint32_t nowMs) {
   uint8_t debounceMs = getDiDebounceMs();
   for (int i = 0; i < NUM_DIGITAL_IN; i++) {
@@ -516,6 +564,7 @@ void setDefaults(Config &cfg) {
   cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
   cfg.reserved[0] = DEFAULT_DI_DEBOUNCE_MS;
+  cfg.reserved[1] = NEO_AUX_NONE;
   cfg.crc = computeCrc(cfg);
 }
 
@@ -545,6 +594,9 @@ static void loadConfig() {
   if (getDiDebounceMs() > 100U) {
     setDiDebounceMs(DEFAULT_DI_DEBOUNCE_MS);
   }
+  if (getNeoAuxMode() > NEO_AUX_TEST) {
+    setNeoAuxMode(NEO_AUX_NONE);
+  }
 }
 
 static uint32_t modeColor(uint8_t mode) {
@@ -563,13 +615,25 @@ static uint32_t modeColor(uint8_t mode) {
 }
 
 static void updateStatusLed(uint32_t nowMs) {
+  for (uint8_t i = 0; i < NEOPIXEL_COUNT; i++) {
+    neoFrame[i] = makeNeoColor(0, 0, 0);
+  }
+
   bool canSilent = (lastCanRxMs == 0) ? (nowMs > config.rxTimeoutMs) : (nowMs - lastCanRxMs > config.rxTimeoutMs);
   if (canSilent) {
     bool on = ((nowMs / 250) % 2) == 0;
-    neopixelShowPacked(on ? makeNeoColor(0, 0, 150) : makeNeoColor(0, 0, 0));
+    neoFrame[NEOPIXEL_MODE_INDEX] = on ? makeNeoColor(0, 0, 150) : makeNeoColor(0, 0, 0);
   } else {
-    neopixelShowPacked(modeColor(config.canMode));
+    neoFrame[NEOPIXEL_MODE_INDEX] = modeColor(config.canMode);
   }
+
+  neoModesRender(getNeoAuxMode(),
+                 nowMs,
+                 neoFrame,
+                 NEOPIXEL_COUNT,
+                 NEOPIXEL_AUX_START_INDEX);
+
+  neopixelShowFrame(neoFrame, NEOPIXEL_COUNT);
 }
 
 static void captureCallback(timer_callback_args_t *p_args) {
@@ -1018,6 +1082,7 @@ static void processCan() {
   while (CAN.available() && count < MAX_RX_PER_LOOP) {
     CanMsg msg = CAN.read();
     lastCanRxMs = millis();
+    neoModesUpdateFromCan(msg, lastCanRxMs);
     if (canRxCount != 0xFFFF) {
       canRxCount++;
     }
@@ -1302,6 +1367,9 @@ static void printHelp() {
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
+  Serial.println("  NEOAUX NONE|SHIFT|GEAR|TEST - NeoPixel aux function after mode LED");
+  Serial.println("  NEOTESTPIX <0-25>      - Number of extra LEDs after mode LED in TEST mode");
+  Serial.println("  NEOTESTHSL <H> <S> <L> - TEST color H:0-359 S:0-100 L:0-100");
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
   Serial.println("  OUTFREQ <ch> <hz>       - Set pair PWM freq via channel (1-8): 1-2/GPT5, 3-4/GPT6, 5-6/GPT7, 7-8/GPT4");
   Serial.println("  CONFIG                 - Print stored configuration");
@@ -1477,6 +1545,19 @@ static void printConfig() {
   Serial.println(")");
   Serial.print("Serial Override: 0x");
   Serial.println(serialOverrideMask, HEX);
+  Serial.print("Neo Aux: ");
+  Serial.print(getNeoAuxMode());
+  Serial.print(" (");
+  Serial.print(neoAuxModeName(getNeoAuxMode()));
+  Serial.println(")");
+  Serial.print("Neo Test Extra Pixels: ");
+  Serial.println(getNeoTestExtraPixels());
+  Serial.print("Neo Test HSL: ");
+  Serial.print(getNeoTestHue());
+  Serial.print(", ");
+  Serial.print(getNeoTestSat());
+  Serial.print(", ");
+  Serial.println(getNeoTestLight());
   Serial.print("Safe Mask: 0x");
   Serial.println(config.safeMask, HEX);
   Serial.print("Active Mask: 0x");
@@ -1555,7 +1636,7 @@ static void handleSerial() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, millis()
       };
       sendJsonConfig(state);
       return;
@@ -1576,7 +1657,7 @@ static void handleSerial() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, millis()
       };
       sendJsonTelemetry(state);
       return;
@@ -1790,6 +1871,62 @@ static void handleSerial() {
     config.canMode = mode;
     saveConfig();
     Serial.println("OK");
+    return;
+  }
+
+  if (cmd.startsWith("NEOAUX")) {
+    String arg = getArg(1);
+    arg.trim();
+    uint8_t newMode = 0xFF;
+    if (arg == "NONE") {
+      newMode = NEO_AUX_NONE;
+    } else if (arg == "SHIFT") {
+      newMode = NEO_AUX_SHIFTLIGHT;
+    } else if (arg == "GEAR") {
+      newMode = NEO_AUX_GEAR;
+    } else if (arg == "TEST") {
+      newMode = NEO_AUX_TEST;
+    }
+
+    if (newMode == 0xFF) {
+      Serial.println("ERR: NEOAUX NONE|SHIFT|GEAR|TEST");
+      return;
+    }
+
+    setNeoAuxMode(newMode);
+    saveConfig();
+    Serial.print("OK: Neo aux ");
+    Serial.println(neoAuxModeName(getNeoAuxMode()));
+    return;
+  }
+
+  if (cmd.startsWith("NEOTESTPIX")) {
+    int count = getArg(1).toInt();
+    if (count < 0 || count > 25) {
+      Serial.println("ERR: NEOTESTPIX <0-25>");
+      return;
+    }
+    setNeoTestExtraPixels(static_cast<uint8_t>(count));
+    Serial.print("OK: Neo test extra pixels=");
+    Serial.println(getNeoTestExtraPixels());
+    return;
+  }
+
+  if (cmd.startsWith("NEOTESTHSL")) {
+    int h = getArg(1).toInt();
+    int s = getArg(2).toInt();
+    int l = getArg(3).toInt();
+    if (h < 0 || h > 359 || s < 0 || s > 100 || l < 0 || l > 100) {
+      Serial.println("ERR: NEOTESTHSL <H 0-359> <S 0-100> <L 0-100>");
+      return;
+    }
+    setNeoTestHsl(static_cast<uint16_t>(h), static_cast<uint8_t>(s), static_cast<uint8_t>(l));
+    Serial.print("OK: Neo test HSL=");
+    Serial.print(getNeoTestHue());
+    Serial.print(",");
+    Serial.print(getNeoTestSat());
+    Serial.print(",");
+    Serial.println(getNeoTestLight());
     return;
   }
 
@@ -2041,6 +2178,7 @@ void setup() {
   analogReadResolution(ADC_RESOLUTION);
 
   loadConfig();
+  neoModesInit();
 
   initAdc();
 
@@ -2073,7 +2211,10 @@ void setup() {
 
   // Initialize NeoPixel (raw P400 driver)
   neopixelInitRaw();
-  neopixelShowPacked(makeNeoColor(0, 0, 0));
+  for (uint8_t i = 0; i < NEOPIXEL_COUNT; i++) {
+    neoFrame[i] = makeNeoColor(0, 0, 0);
+  }
+  neopixelShowFrame(neoFrame, NEOPIXEL_COUNT);
 
   // Initialize CAN before capture inputs so that CAN.begin()'s IRQManager
   // allocations don't overwrite IELSR slots that the GPT capture timers need.
@@ -2127,6 +2268,9 @@ void loop() {
     Serial.print  (" (");
     Serial.print  (canModeName(config.canMode));
     Serial.println(")");
+    Serial.print  ("      Neo Aux: ");
+    Serial.print  (neoAuxModeName(getNeoAuxMode()));
+    Serial.println();
     Serial.println("============================================");
     Serial.println("Type HELP for available commands.");
     Serial.println();
@@ -2202,7 +2346,7 @@ void loop() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, now
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, now
       };
       sendJsonTelemetry(state);
     } else {

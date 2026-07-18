@@ -1,5 +1,6 @@
 #include "protocol.h"
 #include "can_modes.h"
+#include "neo_modes.h"
 
 // External config structure (defined in main.cpp)
 extern struct Config {
@@ -26,6 +27,8 @@ extern void applyInputPullups();
 extern bool setCanBitrate(uint16_t kbps);
 extern uint8_t getDiDebounceMs();
 extern void setDiDebounceMs(uint8_t ms);
+extern uint8_t getNeoAuxMode();
+extern void setNeoAuxMode(uint8_t mode);
 
 // Send JSON hello message on connect
 void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
@@ -36,6 +39,7 @@ void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
   doc["fw"] = fwVersion;
   doc["canMode"] = canMode;
   doc["canModeName"] = canModeName(canMode);
+  doc["neoAuxMode"] = getNeoAuxMode();
   
   JsonArray capabilities = doc.createNestedArray("capabilities");
   capabilities.add("analog");
@@ -152,6 +156,13 @@ void sendJsonTelemetry(const DeviceState& state) {
   can["mode"] = state.canMode;
   can["lastRxMs"] = state.lastCanRxMs;
   can["rxTimeout"] = state.rxTimeoutMs;
+
+  JsonObject neo = doc.createNestedObject("neopixel");
+  neo["auxMode"] = state.neoAuxMode;
+  neo["testExtraPixels"] = state.neoTestExtraPixels;
+  neo["testHue"] = state.neoTestHue;
+  neo["testSat"] = state.neoTestSat;
+  neo["testLight"] = state.neoTestLight;
   
   serializeJson(doc, Serial);
   Serial.println();
@@ -172,6 +183,11 @@ void sendJsonConfig(const DeviceState& state) {
   doc["activeMask"] = state.activeMask;
   doc["inputPullupMask"] = state.inputPullupMask;
   doc["diDebounceMs"] = state.diDebounceMs;
+  doc["neoAuxMode"] = state.neoAuxMode;
+  doc["neoTestExtraPixels"] = state.neoTestExtraPixels;
+  doc["neoTestHue"] = state.neoTestHue;
+  doc["neoTestSat"] = state.neoTestSat;
+  doc["neoTestLight"] = state.neoTestLight;
   
   // Output frequencies (per pair)
   JsonArray outFreqs = doc.createNestedArray("outFreq");
@@ -422,11 +438,87 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
       config.canMode = mode;
       changed = true;
     }
+
+    if (doc.containsKey("neoAuxMode")) {
+      uint8_t mode = doc["neoAuxMode"];
+      if (mode > NEO_AUX_TEST) {
+        return {false, "Neo aux mode must be 0-3"};
+      }
+      setNeoAuxMode(mode);
+      changed = true;
+    }
+
+    if (doc.containsKey("neoTestExtraPixels")) {
+      uint8_t count = doc["neoTestExtraPixels"];
+      if (count > 25) {
+        return {false, "Neo test extra pixels must be 0-25"};
+      }
+      neoModesSetTestExtraPixels(count);
+      changed = true;
+    }
+
+    if (doc.containsKey("neoTestHue") || doc.containsKey("neoTestSat") || doc.containsKey("neoTestLight")) {
+      uint16_t hue = doc["neoTestHue"] | neoModesGetTestHue();
+      uint8_t sat = doc["neoTestSat"] | neoModesGetTestSat();
+      uint8_t light = doc["neoTestLight"] | neoModesGetTestLight();
+      if (hue > 359 || sat > 100 || light > 100) {
+        return {false, "Neo test HSL out of range"};
+      }
+      neoModesSetTestHsl(hue, sat, light);
+      changed = true;
+    }
     
     if (changed) {
       configChanged = true;
     }
     
+    return {true, ""};
+  }
+
+  if (strcmp(cmd, "setNeoAux") == 0) {
+    uint8_t mode = 255;
+    if (doc.containsKey("mode")) {
+      if (doc["mode"].is<const char *>()) {
+        const char *name = doc["mode"];
+        if (strcmp(name, "none") == 0 || strcmp(name, "NONE") == 0) {
+          mode = 0;
+        } else if (strcmp(name, "shift") == 0 || strcmp(name, "SHIFT") == 0) {
+          mode = 1;
+        } else if (strcmp(name, "gear") == 0 || strcmp(name, "GEAR") == 0) {
+          mode = 2;
+        } else if (strcmp(name, "test") == 0 || strcmp(name, "TEST") == 0) {
+          mode = 3;
+        }
+      } else {
+        mode = doc["mode"] | 255;
+      }
+    }
+
+    if (mode > NEO_AUX_TEST) {
+      return {false, "Neo aux mode must be NONE|SHIFT|GEAR|TEST or 0-3"};
+    }
+
+    setNeoAuxMode(mode);
+    configChanged = true;
+    return {true, ""};
+  }
+
+  if (strcmp(cmd, "setNeoTest") == 0) {
+    uint8_t count = doc["extraPixels"] | neoModesGetTestExtraPixels();
+    uint16_t hue = doc["h"] | neoModesGetTestHue();
+    uint8_t sat = doc["s"] | neoModesGetTestSat();
+    uint8_t light = doc["l"] | neoModesGetTestLight();
+
+    if (count > 25) {
+      return {false, "extraPixels must be 0-25"};
+    }
+    if (hue > 359 || sat > 100 || light > 100) {
+      return {false, "HSL out of range"};
+    }
+
+    neoModesSetTestExtraPixels(count);
+    neoModesSetTestHsl(hue, sat, light);
+    configChanged = true;
     return {true, ""};
   }
   

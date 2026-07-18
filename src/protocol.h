@@ -72,6 +72,11 @@ struct DeviceState {
   uint16_t rxTimeoutMs;
   uint8_t inputPullupMask;
   uint8_t diDebounceMs;
+  uint8_t neoAuxMode;
+  uint8_t neoTestExtraPixels;
+  uint16_t neoTestHue;
+  uint8_t neoTestSat;
+  uint8_t neoTestLight;
   uint8_t fwVersion;
   
   // Diagnostics
