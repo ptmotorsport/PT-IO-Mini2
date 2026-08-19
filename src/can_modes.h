@@ -15,7 +15,7 @@ enum CanModeId : uint8_t {
   CAN_MODE_ECUMASTER_CANSWB_V3 = 6,
   CAN_MODE_MOTEC_E888 = 7,
   CAN_MODE_EMTRON = 8,
-  CAN_MODE_RESERVED_9 = 9,
+  CAN_MODE_DINGO_CONFIG = 9,  // DingoConfigurator-compatible param protocol; suspends normal vehicle CAN I/O while active
   CAN_MODE_RESERVED_10 = 10,
   CAN_MODE_RESERVED_11 = 11,
   CAN_MODE_RESERVED_12 = 12,

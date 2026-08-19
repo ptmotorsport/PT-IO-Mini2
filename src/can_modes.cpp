@@ -1,4 +1,5 @@
 #include "can_modes.h"
+#include "dingo_protocol.h"
 
 static const char *CAN_MODE_NAMES[CAN_MODE_COUNT] = {
   "PT_Default1",
@@ -10,7 +11,7 @@ static const char *CAN_MODE_NAMES[CAN_MODE_COUNT] = {
   "ECU Master CANSWB v3",
   "Motec E888",
   "Emtron",
-  "reserved",
+  "DingoConfig",
   "reserved",
   "reserved",
   "reserved",
@@ -1256,8 +1257,19 @@ bool canModeHandleRx(uint8_t mode,
       (void)pullupChanged;
       return motecE888HandleRx(msg, defaultPwmFreqHz, outputFreq, outputDuty);
 
+    case CAN_MODE_DINGO_CONFIG:
+      // Dedicated param-protocol channel; vehicle CAN I/O is fully suspended.
+      // Applies writes directly to outputFreq[]/outputDuty[]/config so the
+      // caller's existing serial-override + applyOutputs() logic picks them up.
+      (void)defaultPwmFreqHz;
+      (void)safeMask;
+      (void)activeMask;
+      (void)inputPullupMask;
+      maskChanged = false;
+      pullupChanged = false;
+      return dingoHandleRx(msg, rxBaseId, outputFreq, outputDuty);
+
     case CAN_MODE_EMTRON:
-    case CAN_MODE_RESERVED_9:
     case CAN_MODE_RESERVED_10:
     case CAN_MODE_RESERVED_11:
     case CAN_MODE_RESERVED_12:
@@ -1314,6 +1326,19 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
 
   if (mode == CAN_MODE_MOTEC_E888) {
     motecE888BuildTxAnalogFrame(analogRaw14, frame0);
+    frame1.id = 0;
+    frame1.len = 0;
+    memset(frame1.data, 0, sizeof(frame1.data));
+    return;
+  }
+
+  if (mode == CAN_MODE_DINGO_CONFIG) {
+    // Offsets 0/1 are reserved for the DingoConfig config-protocol channel;
+    // cache this cycle's readings for the DiPair slots to report as mV instead.
+    dingoCacheAnalogRaw(analogRaw14);
+    frame0.id = 0;
+    frame0.len = 0;
+    memset(frame0.data, 0, sizeof(frame0.data));
     frame1.id = 0;
     frame1.len = 0;
     memset(frame1.data, 0, sizeof(frame1.data));
@@ -1401,6 +1426,11 @@ void canModeBuildTxStateFrame(uint8_t mode,
   if (mode == CAN_MODE_MOTEC_E888) {
     motecE888TxState.digitalInMask = digitalInMask;
     motecE888BuildTxDiagFrame(digitalInMask, fwVersion, frame);
+    return;
+  }
+
+  if (mode == CAN_MODE_DINGO_CONFIG) {
+    dingoBuildStateFrame(txBaseId, digitalInMask, fwVersion, frame);
     return;
   }
 
@@ -1536,6 +1566,14 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
                             frame);
     return;
   }
+
+  if (mode == CAN_MODE_DINGO_CONFIG) {
+    (void)timerFreq0; (void)period0; (void)high0; (void)hasPeriod0;
+    (void)timerFreq1; (void)period1; (void)high1; (void)hasPeriod1;
+    dingoBuildDiPairFrame(baseId, frame);
+    return;
+  }
+
   modeStubBuildTxDiPairFrame(baseId,
                              timerFreq0,
                              period0,
@@ -1586,5 +1624,11 @@ void canModeBuildTxStatusFrame(uint8_t mode,
     mode0BuildTxStatusFrame(txBaseId, status, frame);
     return;
   }
+
+  if (mode == CAN_MODE_DINGO_CONFIG) {
+    dingoBuildStatusFrame(txBaseId, frame);
+    return;
+  }
+
   modeStubBuildTxStatusFrame(txBaseId, status, frame);
 }

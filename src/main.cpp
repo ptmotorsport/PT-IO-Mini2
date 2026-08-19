@@ -339,6 +339,16 @@ void setNeoAuxMode(uint8_t mode) {
   config.reserved[1] = mode;
 }
 
+// Exposed to dingo_protocol.cpp — const globals below have internal linkage
+// in C++, so a plain extern of them from another translation unit won't link.
+uint8_t getFwVersion() {
+  return FW_VERSION;
+}
+
+uint8_t getDiActiveLowMask() {
+  return DI_ACTIVE_LOW_MASK;
+}
+
 uint8_t getNeoTestExtraPixels() {
   return neoModesGetTestExtraPixels();
 }
@@ -1009,9 +1019,12 @@ static void handleCanRx(const CanMsg &msg) {
 
   bool changed = false;
   bool pullupChanged = false;
+  // DingoConfig mode repurposes txBaseId as the single dingoFW BaseId
+  // (config+cyclic offsets); rxBaseId is unused while this mode is active.
+  uint16_t effectiveRxBaseId = (config.canMode == CAN_MODE_DINGO_CONFIG) ? config.txBaseId : config.rxBaseId;
   bool handled = canModeHandleRx(config.canMode,
                                  msg,
-                                 config.rxBaseId,
+                                 effectiveRxBaseId,
                                  DEFAULT_PWM_FREQ_HZ,
                                  outputFreq,
                                  outputDuty,
