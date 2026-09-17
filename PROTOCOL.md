@@ -12,6 +12,33 @@ The PT-IO-Mini2 device supports bidirectional communication over USB Serial (CDC
 
 ---
 
+## Closed-Loop Position Control
+
+`CANMODE 11` enables the closed-loop position control feature. In this mode the firmware uses:
+
+- `AV5` and `AV6` for actuator position sensing
+- `AV7` and `AV8` for command/input sensing
+- `OUT1`/`OUT2` and `OUT3`/`OUT4` for the two half-bridges on the daughter board
+
+### CLI Commands
+
+- `CLPC STATUS` shows the current controller state, target, actuator position, duty, and fault.
+- `CLPC ENABLE ON|OFF` arms or disarms closed-loop actuator control.
+- `CLPC TARGET <0-100>` sets a manual target override in percent.
+- `CLPC TARGET AUTO` returns target control to the sensor input.
+- `CLPC CALIBRATE PEDAL` calibrates the input sensor only.
+- `CLPC CALIBRATE THROTTLE` calibrates the actuator sensor/motor only.
+- `CLPC CALIBRATE ALL` runs the full sequence and learns the sensor and actuator endpoints plus baseline PID gains.
+- `CLPC PID <kp> <ki> <kd>` sets PID gains.
+- `CLPC PWM <hz>` sets the motor drive PWM frequency.
+- `CLPC INVERT ON|OFF` swaps the open/close motor direction.
+- `CLPC CLEARFAULT` clears the controller fault state.
+- `CLPC SAVE` writes the calibration/configuration to EEPROM.
+
+### JSON Telemetry
+
+When the closed-loop position control mode is active, telemetry includes a `closedLoopActuatorControl` object with the controller state, fault, actuator position, target, motor duty, calibration stage, and calibration progress. The configuration snapshot also includes the persisted calibration endpoints and PID gains.
+
 ## Message Format
 
 All messages are **newline-terminated** strings. The device uses `\n` as the frame delimiter.

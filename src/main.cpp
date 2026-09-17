@@ -183,7 +183,7 @@ const uint8_t DI_ACTIVE_LOW_MASK = 0xFF;
 
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
-const uint8_t CONFIG_VERSION = 2;
+const uint8_t CONFIG_VERSION = 3;
 
 struct Config {
   uint16_t magic;
@@ -197,6 +197,7 @@ struct Config {
   uint8_t safeMask;
   uint8_t activeMask;
   uint8_t canMode;
+  uint8_t neoAuxBrightness;
   uint8_t inputPullupMask;
   uint8_t reserved[2];
   uint16_t crc;
@@ -337,6 +338,14 @@ uint8_t getNeoAuxMode() {
 
 void setNeoAuxMode(uint8_t mode) {
   config.reserved[1] = mode;
+}
+
+uint8_t getNeoAuxBrightness() {
+  return neoModesGetAuxBrightness();
+}
+
+void setNeoAuxBrightness(uint8_t brightness) {
+  neoModesSetAuxBrightness(brightness);
 }
 
 uint8_t getNeoTestExtraPixels() {
@@ -561,6 +570,7 @@ void setDefaults(Config &cfg) {
   cfg.safeMask = 0x00;   // all outputs safe OFF
   cfg.activeMask = 0x00; // active LOW by default
   cfg.canMode = 0;
+  cfg.neoAuxBrightness = 255;
   cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
   cfg.reserved[0] = DEFAULT_DI_DEBOUNCE_MS;
@@ -597,6 +607,7 @@ static void loadConfig() {
   if (getNeoAuxMode() > NEO_AUX_TEST) {
     setNeoAuxMode(NEO_AUX_NONE);
   }
+  setNeoAuxBrightness(config.neoAuxBrightness);
 }
 
 static uint32_t modeColor(uint8_t mode) {
@@ -1368,6 +1379,7 @@ static void printHelp() {
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
   Serial.println("  NEOAUX NONE|SHIFT|GEAR|TEST - NeoPixel aux function after mode LED");
+  Serial.println("  NEOAUXBRIGHT <0-255>   - Brightness scale for SHIFT/GEAR aux pixels");
   Serial.println("  NEOTESTPIX <0-25>      - Number of extra LEDs after mode LED in TEST mode");
   Serial.println("  NEOTESTHSL <H> <S> <L> - TEST color H:0-359 S:0-100 L:0-100");
   Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
@@ -1550,6 +1562,8 @@ static void printConfig() {
   Serial.print(" (");
   Serial.print(neoAuxModeName(getNeoAuxMode()));
   Serial.println(")");
+  Serial.print("Neo Aux Brightness: ");
+  Serial.println(getNeoAuxBrightness());
   Serial.print("Neo Test Extra Pixels: ");
   Serial.println(getNeoTestExtraPixels());
   Serial.print("Neo Test HSL: ");
@@ -1636,7 +1650,8 @@ static void handleSerial() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, millis()
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoAuxBrightness(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION,
+        nullptr, nullptr, adcScanFailCount, millis()
       };
       sendJsonConfig(state);
       return;
@@ -1657,7 +1672,8 @@ static void handleSerial() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, millis()
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoAuxBrightness(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION,
+        nullptr, nullptr, adcScanFailCount, millis()
       };
       sendJsonTelemetry(state);
       return;
@@ -1665,6 +1681,7 @@ static void handleSerial() {
     
     if (result.errorMsg == "resetDefaults") {
       setDefaults(config);
+      setNeoAuxBrightness(config.neoAuxBrightness);
       saveConfig();
       for (int p = 0; p < 4; p++) {
         outputFreq[p * 2]     = config.outFreqHz[p];
@@ -1704,6 +1721,7 @@ static void handleSerial() {
   }
   if (cmd == "DEFAULTS") {
     setDefaults(config);
+    setNeoAuxBrightness(config.neoAuxBrightness);
     saveConfig();
     // Reload output frequencies from fresh defaults
     for (int p = 0; p < 4; p++) {
@@ -1874,7 +1892,21 @@ static void handleSerial() {
     return;
   }
 
-  if (cmd.startsWith("NEOAUX")) {
+  if (cmd.startsWith("NEOAUXBRIGHT")) {
+    int bright = getArg(1).toInt();
+    if (bright < 0 || bright > 255) {
+      Serial.println("ERR: NEOAUXBRIGHT <0-255>");
+      return;
+    }
+    config.neoAuxBrightness = static_cast<uint8_t>(bright);
+    setNeoAuxBrightness(config.neoAuxBrightness);
+    saveConfig();
+    Serial.print("OK: Neo aux brightness=");
+    Serial.println(getNeoAuxBrightness());
+    return;
+  }
+
+  if (cmd == "NEOAUX" || cmd.startsWith("NEOAUX ")) {
     String arg = getArg(1);
     arg.trim();
     uint8_t newMode = 0xFF;
@@ -2179,6 +2211,7 @@ void setup() {
 
   loadConfig();
   neoModesInit();
+  setNeoAuxBrightness(config.neoAuxBrightness);
 
   initAdc();
 
@@ -2346,7 +2379,8 @@ void loop() {
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
         config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
-        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION, adcScanFailCount, now
+        config.inputPullupMask, getDiDebounceMs(), getNeoAuxMode(), getNeoAuxBrightness(), getNeoTestExtraPixels(), getNeoTestHue(), getNeoTestSat(), getNeoTestLight(), FW_VERSION,
+        nullptr, nullptr, adcScanFailCount, now
       };
       sendJsonTelemetry(state);
     } else {

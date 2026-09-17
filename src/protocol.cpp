@@ -15,8 +15,10 @@ extern struct Config {
   uint8_t safeMask;
   uint8_t activeMask;
   uint8_t canMode;
+  uint8_t neoAuxBrightness;
   uint8_t inputPullupMask;
   uint8_t reserved[2];
+  DbwConfig dbw;
   uint16_t crc;
 } config;
 
@@ -29,6 +31,8 @@ extern uint8_t getDiDebounceMs();
 extern void setDiDebounceMs(uint8_t ms);
 extern uint8_t getNeoAuxMode();
 extern void setNeoAuxMode(uint8_t mode);
+extern uint8_t getNeoAuxBrightness();
+extern void setNeoAuxBrightness(uint8_t brightness);
 
 // Send JSON hello message on connect
 void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
@@ -40,6 +44,7 @@ void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
   doc["canMode"] = canMode;
   doc["canModeName"] = canModeName(canMode);
   doc["neoAuxMode"] = getNeoAuxMode();
+  doc["neoAuxBrightness"] = getNeoAuxBrightness();
   
   JsonArray capabilities = doc.createNestedArray("capabilities");
   capabilities.add("analog");
@@ -47,6 +52,7 @@ void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
   capabilities.add("pwm");
   capabilities.add("can");
   capabilities.add("config");
+  capabilities.add("closedLoopActuatorControl");
   
   doc["analogChannels"] = 8;
   doc["digitalIn"] = 8;
@@ -159,10 +165,36 @@ void sendJsonTelemetry(const DeviceState& state) {
 
   JsonObject neo = doc.createNestedObject("neopixel");
   neo["auxMode"] = state.neoAuxMode;
+  neo["auxBrightness"] = state.neoAuxBrightness;
   neo["testExtraPixels"] = state.neoTestExtraPixels;
   neo["testHue"] = state.neoTestHue;
   neo["testSat"] = state.neoTestSat;
   neo["testLight"] = state.neoTestLight;
+
+  if (state.dbwConfig != nullptr && state.dbwStatus != nullptr) {
+    JsonObject actuator = doc.createNestedObject("closedLoopActuatorControl");
+    actuator["state"] = state.dbwStatus->state;
+    actuator["stateName"] = dbwStateName(state.dbwStatus->state);
+    actuator["fault"] = state.dbwStatus->faultReason;
+    actuator["faultName"] = dbwFaultName(state.dbwStatus->faultReason);
+    actuator["pedal"] = state.dbwStatus->pedalPermil;
+    actuator["throttle"] = state.dbwStatus->throttlePermil;
+    actuator["target"] = state.dbwStatus->targetPermil;
+    actuator["motorDuty"] = state.dbwStatus->motorDuty;
+    actuator["error"] = state.dbwStatus->errorPermil;
+    actuator["stage"] = state.dbwStatus->calStage;
+    actuator["progress"] = state.dbwStatus->calProgressPermil;
+    actuator["autoTuneResult"] = state.dbwStatus->autoTuneResult;
+    actuator["autoTunePass"] = state.dbwStatus->autoTunePass;
+    actuator["autoTuneMaxOvershoot"] = state.dbwStatus->autoTuneMaxOvershoot;
+    actuator["autoTuneMaxSettleMs"] = state.dbwStatus->autoTuneMaxSettleMs;
+    actuator["autoTuneLastSteadyError"] = state.dbwStatus->autoTuneLastSteadyError;
+    actuator["enabled"] = state.dbwConfig->enabled;
+    actuator["calibrated"] = state.dbwConfig->calibrated;
+    actuator["controlMode"] = dbwGetControlMode(*state.dbwConfig);
+    actuator["controlModeName"] = dbwControlModeName(dbwGetControlMode(*state.dbwConfig));
+    actuator["dinChannel"] = dbwGetDigitalInputChannel(*state.dbwConfig) + 1U;
+  }
   
   serializeJson(doc, Serial);
   Serial.println();
@@ -184,10 +216,41 @@ void sendJsonConfig(const DeviceState& state) {
   doc["inputPullupMask"] = state.inputPullupMask;
   doc["diDebounceMs"] = state.diDebounceMs;
   doc["neoAuxMode"] = state.neoAuxMode;
+  doc["neoAuxBrightness"] = state.neoAuxBrightness;
   doc["neoTestExtraPixels"] = state.neoTestExtraPixels;
   doc["neoTestHue"] = state.neoTestHue;
   doc["neoTestSat"] = state.neoTestSat;
   doc["neoTestLight"] = state.neoTestLight;
+
+  if (state.dbwConfig != nullptr) {
+    JsonObject dbw = doc.createNestedObject("dbw");
+    dbw["enabled"] = state.dbwConfig->enabled;
+    dbw["calibrated"] = state.dbwConfig->calibrated;
+    dbw["invert"] = state.dbwConfig->directionInvert;
+    dbw["pwmFreq"] = state.dbwConfig->pwmFreqHz;
+    dbw["deadband"] = state.dbwConfig->deadbandPermil;
+    dbw["sensorMismatch"] = state.dbwConfig->sensorMismatchPermil;
+    dbw["maxDuty"] = state.dbwConfig->maxDuty;
+    dbw["kp"] = state.dbwConfig->kp_x1000;
+    dbw["ki"] = state.dbwConfig->ki_x1000;
+    dbw["kd"] = state.dbwConfig->kd_x1000;
+    dbw["controlMode"] = dbwGetControlMode(*state.dbwConfig);
+    dbw["controlModeName"] = dbwControlModeName(dbwGetControlMode(*state.dbwConfig));
+    dbw["dinChannel"] = dbwGetDigitalInputChannel(*state.dbwConfig) + 1U;
+
+    JsonArray pedalClosed = dbw.createNestedArray("pedalClosed");
+    pedalClosed.add(state.dbwConfig->pedalClosedRaw[0]);
+    pedalClosed.add(state.dbwConfig->pedalClosedRaw[1]);
+    JsonArray pedalOpen = dbw.createNestedArray("pedalOpen");
+    pedalOpen.add(state.dbwConfig->pedalOpenRaw[0]);
+    pedalOpen.add(state.dbwConfig->pedalOpenRaw[1]);
+    JsonArray throttleClosed = dbw.createNestedArray("throttleClosed");
+    throttleClosed.add(state.dbwConfig->throttleClosedRaw[0]);
+    throttleClosed.add(state.dbwConfig->throttleClosedRaw[1]);
+    JsonArray throttleOpen = dbw.createNestedArray("throttleOpen");
+    throttleOpen.add(state.dbwConfig->throttleOpenRaw[0]);
+    throttleOpen.add(state.dbwConfig->throttleOpenRaw[1]);
+  }
   
   // Output frequencies (per pair)
   JsonArray outFreqs = doc.createNestedArray("outFreq");
@@ -448,6 +511,16 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
       changed = true;
     }
 
+    if (doc.containsKey("neoAuxBrightness")) {
+      int brightness = doc["neoAuxBrightness"];
+      if (brightness < 0 || brightness > 255) {
+        return {false, "Neo aux brightness must be 0-255"};
+      }
+      config.neoAuxBrightness = static_cast<uint8_t>(brightness);
+      setNeoAuxBrightness(config.neoAuxBrightness);
+      changed = true;
+    }
+
     if (doc.containsKey("neoTestExtraPixels")) {
       uint8_t count = doc["neoTestExtraPixels"];
       if (count > 25) {
@@ -499,6 +572,17 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     }
 
     setNeoAuxMode(mode);
+    configChanged = true;
+    return {true, ""};
+  }
+
+  if (strcmp(cmd, "setNeoAuxBrightness") == 0) {
+    int brightness = doc["brightness"] | static_cast<int>(getNeoAuxBrightness());
+    if (brightness < 0 || brightness > 255) {
+      return {false, "brightness must be 0-255"};
+    }
+    config.neoAuxBrightness = static_cast<uint8_t>(brightness);
+    setNeoAuxBrightness(config.neoAuxBrightness);
     configChanged = true;
     return {true, ""};
   }

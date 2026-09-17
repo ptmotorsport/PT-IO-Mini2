@@ -12,7 +12,7 @@ static const char *CAN_MODE_NAMES[CAN_MODE_COUNT] = {
   "Emtron",
   "reserved",
   "reserved",
-  "reserved",
+  "Closed-Loop Position Control",
   "reserved",
   "reserved",
   "reserved",
@@ -1259,11 +1259,16 @@ bool canModeHandleRx(uint8_t mode,
     case CAN_MODE_EMTRON:
     case CAN_MODE_RESERVED_9:
     case CAN_MODE_RESERVED_10:
-    case CAN_MODE_RESERVED_11:
+    case CAN_MODE_DBW_THROTTLE:
     case CAN_MODE_RESERVED_12:
     case CAN_MODE_RESERVED_13:
     case CAN_MODE_RESERVED_14:
     case CAN_MODE_RESERVED_15:
+      if (mode == CAN_MODE_DBW_THROTTLE) {
+        maskChanged = false;
+        pullupChanged = false;
+        return false;
+      }
       return modeStubHandleRx(msg,
                               rxBaseId,
                               defaultPwmFreqHz,
@@ -1314,6 +1319,16 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
 
   if (mode == CAN_MODE_MOTEC_E888) {
     motecE888BuildTxAnalogFrame(analogRaw14, frame0);
+    frame1.id = 0;
+    frame1.len = 0;
+    memset(frame1.data, 0, sizeof(frame1.data));
+    return;
+  }
+
+  if (mode == CAN_MODE_DBW_THROTTLE) {
+    frame0.id = 0;
+    frame0.len = 0;
+    memset(frame0.data, 0, sizeof(frame0.data));
     frame1.id = 0;
     frame1.len = 0;
     memset(frame1.data, 0, sizeof(frame1.data));
@@ -1395,6 +1410,13 @@ void canModeBuildTxStateFrame(uint8_t mode,
                                      activeMask,
                                      fwVersion,
                                      frame);
+    return;
+  }
+
+  if (mode == CAN_MODE_DBW_THROTTLE) {
+    frame.id = 0;
+    frame.len = 0;
+    memset(frame.data, 0, sizeof(frame.data));
     return;
   }
 
@@ -1536,6 +1558,12 @@ void canModeBuildTxDiPairFrame(uint8_t mode,
                             frame);
     return;
   }
+  if (mode == CAN_MODE_DBW_THROTTLE) {
+    frame.id = 0;
+    frame.len = 0;
+    memset(frame.data, 0, sizeof(frame.data));
+    return;
+  }
   modeStubBuildTxDiPairFrame(baseId,
                              timerFreq0,
                              period0,
@@ -1584,6 +1612,12 @@ void canModeBuildTxStatusFrame(uint8_t mode,
 
   if (mode == CAN_MODE_PT_DEFAULT1) {
     mode0BuildTxStatusFrame(txBaseId, status, frame);
+    return;
+  }
+  if (mode == CAN_MODE_DBW_THROTTLE) {
+    frame.id = 0;
+    frame.len = 0;
+    memset(frame.data, 0, sizeof(frame.data));
     return;
   }
   modeStubBuildTxStatusFrame(txBaseId, status, frame);

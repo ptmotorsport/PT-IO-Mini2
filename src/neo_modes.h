@@ -22,6 +22,8 @@ void neoModesRender(uint8_t auxMode,
 
 uint8_t neoModesGetTestExtraPixels();
 void neoModesSetTestExtraPixels(uint8_t count);
+uint8_t neoModesGetAuxBrightness();
+void neoModesSetAuxBrightness(uint8_t brightness);
 uint16_t neoModesGetTestHue();
 uint8_t neoModesGetTestSat();
 uint8_t neoModesGetTestLight();

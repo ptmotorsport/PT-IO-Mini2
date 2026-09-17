@@ -3,13 +3,15 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+#include "dbw_mode.h"
+
 // Protocol version
 constexpr uint8_t PROTOCOL_VERSION = 1;
 
 // JSON document sizes (bytes)
 constexpr size_t JSON_CMD_DOC_SIZE = 512;
 constexpr size_t JSON_TELEMETRY_DOC_SIZE = 1024;
-constexpr size_t JSON_RESPONSE_DOC_SIZE = 256;
+constexpr size_t JSON_RESPONSE_DOC_SIZE = 768;
 constexpr size_t JSON_HELLO_DOC_SIZE = 384;
 
 // Telemetry format
@@ -73,11 +75,14 @@ struct DeviceState {
   uint8_t inputPullupMask;
   uint8_t diDebounceMs;
   uint8_t neoAuxMode;
+  uint8_t neoAuxBrightness;
   uint8_t neoTestExtraPixels;
   uint16_t neoTestHue;
   uint8_t neoTestSat;
   uint8_t neoTestLight;
   uint8_t fwVersion;
+  const DbwConfig *dbwConfig;
+  const DbwStatus *dbwStatus;
   
   // Diagnostics
   uint32_t adcScanFailCount;

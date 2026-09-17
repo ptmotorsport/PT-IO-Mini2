@@ -11,6 +11,7 @@ char neoGearChar = 'N';
 uint32_t neoGearUpdatedMs = 0;
 
 uint8_t neoTestExtraPixels = NEO_SHIFTLIGHT_COUNT;
+uint8_t neoAuxBrightness = 255;
 uint16_t neoTestHue = 0;
 uint8_t neoTestSat = 100;
 uint8_t neoTestLight = 40;
@@ -19,6 +20,31 @@ static uint32_t neoColor(uint8_t r, uint8_t g, uint8_t b) {
   return (static_cast<uint32_t>(r) << 16)
        | (static_cast<uint32_t>(g) << 8)
        | static_cast<uint32_t>(b);
+}
+
+static uint32_t scaleColor(uint32_t color, uint8_t scale) {
+  if (scale >= 255U) {
+    return color;
+  }
+  uint8_t r = static_cast<uint8_t>((color >> 16) & 0xFFU);
+  uint8_t g = static_cast<uint8_t>((color >> 8) & 0xFFU);
+  uint8_t b = static_cast<uint8_t>(color & 0xFFU);
+  r = static_cast<uint8_t>((static_cast<uint16_t>(r) * scale + 127U) / 255U);
+  g = static_cast<uint8_t>((static_cast<uint16_t>(g) * scale + 127U) / 255U);
+  b = static_cast<uint8_t>((static_cast<uint16_t>(b) * scale + 127U) / 255U);
+  return neoColor(r, g, b);
+}
+
+static void applyAuxBrightness(uint32_t *frame, uint8_t frameCount, uint8_t auxStartIndex) {
+  if (frame == nullptr || frameCount <= auxStartIndex) {
+    return;
+  }
+  if (neoAuxBrightness >= 255U) {
+    return;
+  }
+  for (uint8_t i = auxStartIndex; i < frameCount; i++) {
+    frame[i] = scaleColor(frame[i], neoAuxBrightness);
+  }
 }
 
 static char decodeHaltechGearByte(uint8_t gearByte) {
@@ -249,6 +275,7 @@ void neoModesInit() {
   neoGearChar = 'N';
   neoGearUpdatedMs = 0;
   neoTestExtraPixels = NEO_SHIFTLIGHT_COUNT;
+  neoAuxBrightness = 255;
   neoTestHue = 0;
   neoTestSat = 100;
   neoTestLight = 40;
@@ -285,9 +312,11 @@ void neoModesRender(uint8_t auxMode,
   switch (auxMode) {
     case NEO_AUX_SHIFTLIGHT:
       neoRenderShiftlight(nowMs, frame, frameCount, auxStartIndex);
+      applyAuxBrightness(frame, frameCount, auxStartIndex);
       break;
     case NEO_AUX_GEAR:
       neoRenderGear(nowMs, frame, frameCount, auxStartIndex);
+      applyAuxBrightness(frame, frameCount, auxStartIndex);
       break;
     case NEO_AUX_TEST:
       neoRenderTest(frame, frameCount, auxStartIndex);
@@ -303,6 +332,14 @@ uint8_t neoModesGetTestExtraPixels() {
 
 void neoModesSetTestExtraPixels(uint8_t count) {
   neoTestExtraPixels = count;
+}
+
+uint8_t neoModesGetAuxBrightness() {
+  return neoAuxBrightness;
+}
+
+void neoModesSetAuxBrightness(uint8_t brightness) {
+  neoAuxBrightness = brightness;
 }
 
 uint16_t neoModesGetTestHue() {
