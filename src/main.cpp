@@ -1,6 +1,7 @@
 ﻿#include <Arduino.h>
 #include <Arduino_CAN.h>
 #include <EEPROM.h>
+#include <Wire.h>
 #include "bsp_api.h"
 #include "r_ioport.h"
 #include "r_adc.h"
@@ -9,7 +10,7 @@
 #include "protocol.h"
 
 // NeoPixel Configuration (raw BSP pin, not Arduino pin index)
-#define NEOPIXEL_BSP_PIN BSP_IO_PORT_04_PIN_00  // P400
+#define NEOPIXEL_BSP_PIN BSP_IO_PORT_01_PIN_12  // P112 (DTM2 D10)
 #define NEOPIXEL_COUNT 1
 constexpr uint8_t NEOPIXEL_BRIGHTNESS = 26; // ~10% of 255
 
@@ -97,49 +98,57 @@ static void neopixelShowPacked(uint32_t color) {
 }
 
 // Analog Input Pin Definitions (using FSP)
+// DTM2 keeps the existing AV1-AV8 logical ordering, but the PCB routes those
+// signals onto a different set of MCU analog pins.
 const bsp_io_port_pin_t ANALOG_PINS[] = {
-  BSP_IO_PORT_00_PIN_00,  // P000 - AV1
-  BSP_IO_PORT_00_PIN_01,  // P001 - AV2
-  BSP_IO_PORT_00_PIN_02,  // P002 - AV3
-  BSP_IO_PORT_00_PIN_03,  // P003 - AV4
-  BSP_IO_PORT_00_PIN_04,  // P004 - AV5
-  BSP_IO_PORT_00_PIN_11,  // P011 - AV6
-  BSP_IO_PORT_00_PIN_14,  // P014 - AV7
-  BSP_IO_PORT_00_PIN_15   // P015 - AV8
+  BSP_IO_PORT_00_PIN_04,  // P004 - AV1
+  BSP_IO_PORT_00_PIN_11,  // P011 - AV2
+  BSP_IO_PORT_00_PIN_14,  // P014 - AV3
+  BSP_IO_PORT_00_PIN_15,  // P015 - AV4
+  BSP_IO_PORT_00_PIN_03,  // P003 - AV5
+  BSP_IO_PORT_00_PIN_02,  // P002 - AV6
+  BSP_IO_PORT_00_PIN_01,  // P001 - AV7
+  BSP_IO_PORT_00_PIN_00   // P000 - AV8
 };
 const char* ANALOG_NAMES[] = {"AV1", "AV2", "AV3", "AV4", "AV5", "AV6", "AV7", "AV8"};
-const char* ANALOG_PORT_NAMES[] = {"P000", "P001", "P002", "P003", "P004", "P011", "P014", "P015"};
+const char* ANALOG_PORT_NAMES[] = {"P004", "P011", "P014", "P015", "P003", "P002", "P001", "P000"};
 const int NUM_ANALOG = 8;
 
-const uint8_t ANALOG_CHANNELS[] = {0, 1, 2, 3, 4, 6, 9, 10};
+const uint8_t ANALOG_CHANNELS[] = {4, 6, 9, 10, 3, 2, 1, 0};
 
 // Digital Input Pin Definitions (using FSP)
 const bsp_io_port_pin_t DIGITAL_IN_PINS[] = {
   BSP_IO_PORT_05_PIN_01,  // P501 - DI1 (GTIOC2B)
   BSP_IO_PORT_01_PIN_04,  // P104 - DI2 (GTIOC1B)
   BSP_IO_PORT_01_PIN_05,  // P105 - DI3 (GTIOC1A)
-  BSP_IO_PORT_01_PIN_06,  // P106 - DI4 (GTIOC0B)
-  BSP_IO_PORT_01_PIN_07,  // P107 - DI5 (GTIOC0A)
-  BSP_IO_PORT_01_PIN_13,  // P113 - DI6 (GTIOC2A)
-  BSP_IO_PORT_01_PIN_12,  // P112 - DI7 (GTIOC3B)
-  BSP_IO_PORT_01_PIN_11   // P111 - DI8 (GTIOC3A)
+  BSP_IO_PORT_01_PIN_06   // P106 - DI4 (GTIOC0B)
 };
-const char* DIGITAL_IN_PORT_NAMES[] = {"P501", "P104", "P105", "P106", "P107", "P113", "P112", "P111"};
-const int NUM_DIGITAL_IN = 8;
+const char* DIGITAL_IN_PORT_NAMES[] = {"P501", "P104", "P105", "P106"};
+const int NUM_DIGITAL_IN = 4;
+const int DI_SLOT_COUNT = 8;
 
 // Digital Output Pin Definitions (using FSP)
 const bsp_io_port_pin_t DIGITAL_OUT_PINS[] = {
-  BSP_IO_PORT_04_PIN_08,  // P408 - DPO1 (GTIOC5B)
-  BSP_IO_PORT_04_PIN_09,  // P409 - DPO2 (GTIOC5A)
-  BSP_IO_PORT_04_PIN_10,  // P410 - DPO3 (GTIOC6B)
-  BSP_IO_PORT_04_PIN_11,  // P411 - DPO4 (GTIOC6A)
-  BSP_IO_PORT_03_PIN_04,  // P304 - DPO5 (GTIOC7A)
-  BSP_IO_PORT_03_PIN_03,  // P303 - DPO6 (GTIOC7B)
-  BSP_IO_PORT_03_PIN_02,  // P302 - DPO7 (GTIOC4A)
-  BSP_IO_PORT_03_PIN_01   // P301 - DPO8 (GTIOC4B)
+  BSP_IO_PORT_04_PIN_10,  // P410 - OUT1 (GTIOC6B)
+  BSP_IO_PORT_04_PIN_08,  // P408 - OUT2 (GTIOC5B)
+  BSP_IO_PORT_03_PIN_02,  // P302 - OUT3 (GTIOC4A)
+  BSP_IO_PORT_03_PIN_04   // P304 - OUT4 (GTIOC7A)
 };
-const char* DIGITAL_OUT_PORT_NAMES[] = {"P408", "P409", "P410", "P411", "P304", "P303", "P302", "P301"};
-const int NUM_DIGITAL_OUT = 8;
+const char* DIGITAL_OUT_PORT_NAMES[] = {"P410", "P408", "P302", "P304"};
+const int NUM_DIGITAL_OUT = 4;
+const int OUTPUT_SLOT_COUNT = 8;
+
+const bsp_io_port_pin_t ANALOG_PULLUP_SWITCH_PINS[] = {
+  BSP_IO_PORT_02_PIN_05,  // P205 - AV1 pull-up switch
+  BSP_IO_PORT_02_PIN_04,  // P204 - AV2 pull-up switch
+  BSP_IO_PORT_03_PIN_03,  // P303 - AV3 pull-up switch
+  BSP_IO_PORT_03_PIN_01   // P301 - AV4 pull-up switch
+};
+const char* ANALOG_PULLUP_SWITCH_PORT_NAMES[] = {"P205", "P204", "P303", "P301"};
+const int NUM_ANALOG_PULLUP_SWITCHES = 4;
+
+const bsp_io_port_pin_t CAN_TERM_SWITCH_PIN = BSP_IO_PORT_04_PIN_09;  // P409
+const char* CAN_TERM_SWITCH_PORT_NAME = "P409";
 
 // ADC Configuration
 const int ADC_RESOLUTION = 14;  // 14-bit ADC
@@ -156,6 +165,23 @@ const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
 const uint8_t FW_VERSION = 0x08;
 
+const uint8_t AUX_SWITCH_ANALOG_PULLUP_1 = 1U << 0;
+const uint8_t AUX_SWITCH_ANALOG_PULLUP_2 = 1U << 1;
+const uint8_t AUX_SWITCH_ANALOG_PULLUP_3 = 1U << 2;
+const uint8_t AUX_SWITCH_ANALOG_PULLUP_4 = 1U << 3;
+const uint8_t AUX_SWITCH_CAN_TERM = 1U << 4;
+const uint8_t AUX_SWITCH_MASK_ALL = AUX_SWITCH_ANALOG_PULLUP_1 |
+                                    AUX_SWITCH_ANALOG_PULLUP_2 |
+                                    AUX_SWITCH_ANALOG_PULLUP_3 |
+                                    AUX_SWITCH_ANALOG_PULLUP_4 |
+                                    AUX_SWITCH_CAN_TERM;
+
+const uint8_t OUTPUT_SENSE_COUNT = 4;
+const uint8_t OUTPUT_SENSE_I2C_ADDRESS = 0x48;  // ADS1115 7-bit address (datasheet write addr 0x90)
+const uint8_t OUTPUT_SENSE_CHANNELS[OUTPUT_SENSE_COUNT] = {3, 2, 1, 0};
+const float OUTPUT_SENSE_FULL_SCALE_VOLTS = 6.144f;
+const float OUTPUT_SENSE_DIVIDER_RATIO = 6.0f;
+
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
 // Set to 0xFF to invert all outputs, or set bits per-channel as needed.
@@ -167,7 +193,7 @@ const uint8_t DI_ACTIVE_LOW_MASK = 0xFF;
 
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
-const uint8_t CONFIG_VERSION = 2;
+const uint8_t CONFIG_VERSION = 3;
 
 struct Config {
   uint16_t magic;
@@ -198,36 +224,36 @@ uint16_t adcBuf[2][NUM_ANALOG];
 volatile uint8_t adcActiveBuf = 0;
 bool adcScanRunning = false;
 uint32_t adcScanFailCount = 0;
+bool outputSenseReady = false;
 
 // Output state
-uint8_t outputDuty[NUM_DIGITAL_OUT];
-uint16_t outputFreq[NUM_DIGITAL_OUT];
+uint8_t outputDuty[OUTPUT_SLOT_COUNT];
+uint16_t outputFreq[OUTPUT_SLOT_COUNT];
 uint32_t lastAppliedPwmCounts[NUM_DIGITAL_OUT] = {
-  0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL,
   0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL
 };
 
-uint32_t diTimerFreq[NUM_DIGITAL_IN];
+uint32_t diTimerFreq[DI_SLOT_COUNT];
 
 // Input capture stats
-volatile uint32_t diLastRise[NUM_DIGITAL_IN];       // timer count at last rising edge (0 = no rise yet)
-volatile uint32_t diLastRiseOverflow[NUM_DIGITAL_IN]; // per-channel overflow count at last rising edge
-volatile bool     diHasFirstRise[NUM_DIGITAL_IN];   // true once first rising edge has been seen
-volatile uint32_t diPeriodCounts[NUM_DIGITAL_IN];
-volatile uint32_t diHighCounts[NUM_DIGITAL_IN];
-volatile bool diHasPeriod[NUM_DIGITAL_IN];
-volatile bool diHasHigh[NUM_DIGITAL_IN];
-volatile uint32_t diCapSeq[NUM_DIGITAL_IN];  // incremented on each capture event
+volatile uint32_t diLastRise[DI_SLOT_COUNT];       // timer count at last rising edge (0 = no rise yet)
+volatile uint32_t diLastRiseOverflow[DI_SLOT_COUNT]; // per-channel overflow count at last rising edge
+volatile bool     diHasFirstRise[DI_SLOT_COUNT];   // true once first rising edge has been seen
+volatile uint32_t diPeriodCounts[DI_SLOT_COUNT];
+volatile uint32_t diHighCounts[DI_SLOT_COUNT];
+volatile bool diHasPeriod[DI_SLOT_COUNT];
+volatile bool diHasHigh[DI_SLOT_COUNT];
+volatile uint32_t diCapSeq[DI_SLOT_COUNT];  // incremented on each capture event
 
 // Stale capture detection (main loop)
-uint32_t diCapSeqLast[NUM_DIGITAL_IN];
-uint32_t diCapTsLast[NUM_DIGITAL_IN];
+uint32_t diCapSeqLast[DI_SLOT_COUNT];
+uint32_t diCapTsLast[DI_SLOT_COUNT];
 const uint32_t DI_STALE_TIMEOUT_MS = 500;
 
 // Debounced DI state used for reported state (CAN state frame + STATUS)
-bool diDebouncedState[NUM_DIGITAL_IN];
-bool diRawPrevState[NUM_DIGITAL_IN];
-uint32_t diRawStableMs[NUM_DIGITAL_IN];
+bool diDebouncedState[DI_SLOT_COUNT];
+bool diRawPrevState[DI_SLOT_COUNT];
+uint32_t diRawStableMs[DI_SLOT_COUNT];
 
 // Serial connection tracking
 bool serialWelcomeSent = false;
@@ -251,21 +277,21 @@ uint8_t serialOverrideMask = 0x00;  // bitmask: bit set = channel under serial/a
 bool rxDebug = false;         // when true, log RX duties, applyOutputs triggers and TX failures
 
 // Timers - input capture
-FspTimer gpt0; // DI4/DI5
-FspTimer gpt1; // DI2/DI3
-FspTimer gpt2; // DI1/DI6
-FspTimer gpt3; // DI7/DI8
+FspTimer gpt0; // DI4 on GTIOC0B
+FspTimer gpt1; // DI2/DI3 on GTIOC1B/A
+FspTimer gpt2; // DI1 on GTIOC2B
+FspTimer gpt3; // unused on DTM2
 
-// Hardware PWM output timers (GPT4, GPT5, GPT6, GPT7)
-FspTimer gpt4_out;  // DPO7-8  (GTIOC4A/4B)
-FspTimer gpt5_out;  // DPO1-2  (GTIOC5A/5B)
-FspTimer gpt6_out;  // DPO3-4  (GTIOC6A/6B)
-FspTimer gpt7_out;  // DPO5-6  (GTIOC7A/7B)
+// Hardware PWM output timers (one active channel per GPT on DTM2)
+FspTimer gpt4_out;  // OUT3 (GTIOC4A)
+FspTimer gpt5_out;  // OUT2 (GTIOC5B)
+FspTimer gpt6_out;  // OUT1 (GTIOC6B)
+FspTimer gpt7_out;  // OUT4 (GTIOC7A)
 uint32_t gpt4PeriodCounts = 0;
 uint32_t gpt5PeriodCounts = 0;
 uint32_t gpt6PeriodCounts = 0;
 uint32_t gpt7PeriodCounts = 0;
-// Last applied output frequency per GPT pair (0=GPT5/DPO1-2, 1=GPT6/DPO3-4, 2=GPT7/DPO5-6, 3=GPT4/DPO7-8)
+// Last applied output frequency per hardware output.
 // Initialised to 0 so any non-zero loaded frequency triggers an update on first applyOutputs()
 uint16_t lastAppliedOutputFreqHz[4] = {0, 0, 0, 0};
 
@@ -302,6 +328,9 @@ static uint32_t diActiveCounts(uint8_t index, uint32_t periodCounts, uint32_t hi
 }
 
 static bool readDigitalIn(uint8_t index) {
+  if (index >= NUM_DIGITAL_IN) {
+    return false;
+  }
   uint8_t port = DIGITAL_IN_PINS[index] >> 8;
   uint8_t pin = DIGITAL_IN_PINS[index] & 0xFF;
   return R_PFS->PORT[port].PIN[pin].PmnPFS_b.PIDR ? true : false;
@@ -313,6 +342,25 @@ uint8_t getDiDebounceMs() {
 
 void setDiDebounceMs(uint8_t ms) {
   config.reserved[0] = ms;
+}
+
+static uint8_t getAuxSwitchMask() {
+  return static_cast<uint8_t>(config.reserved[1] & AUX_SWITCH_MASK_ALL);
+}
+
+static void setAuxSwitchMask(uint8_t mask) {
+  config.reserved[1] = static_cast<uint8_t>((config.reserved[1] & ~AUX_SWITCH_MASK_ALL) | (mask & AUX_SWITCH_MASK_ALL));
+}
+
+static bool getAnalogPullupEnabled(uint8_t index) {
+  if (index >= NUM_ANALOG_PULLUP_SWITCHES) {
+    return false;
+  }
+  return ((getAuxSwitchMask() >> index) & 0x01U) != 0U;
+}
+
+static bool getCanTerminationEnabled() {
+  return (getAuxSwitchMask() & AUX_SWITCH_CAN_TERM) != 0U;
 }
 
 static void updateDigitalInDebounce(uint32_t nowMs) {
@@ -335,6 +383,9 @@ static void updateDigitalInDebounce(uint32_t nowMs) {
 }
 
 static bool readDigitalOut(uint8_t index) {
+  if (index >= NUM_DIGITAL_OUT) {
+    return false;
+  }
   uint8_t port = DIGITAL_OUT_PINS[index] >> 8;
   uint8_t pin = DIGITAL_OUT_PINS[index] & 0xFF;
   // Read actual pin level via PCNTR2.PIDR (not PFS PODR which may be stale)
@@ -388,6 +439,131 @@ void applyInputPullups() {
       cfg |= IOPORT_CFG_PULLUP_ENABLE;
     }
     R_IOPORT_PinCfg(&g_ioport_ctrl, DIGITAL_IN_PINS[i], cfg);
+  }
+}
+
+static void initAuxSwitchOutputs() {
+  for (int i = 0; i < NUM_ANALOG_PULLUP_SWITCHES; i++) {
+    configureGpioOutput(ANALOG_PULLUP_SWITCH_PINS[i], false);
+  }
+  configureGpioOutput(CAN_TERM_SWITCH_PIN, false);
+}
+
+static void applyAuxSwitchStates() {
+  for (int i = 0; i < NUM_ANALOG_PULLUP_SWITCHES; i++) {
+    writeGpioOutput(ANALOG_PULLUP_SWITCH_PINS[i], getAnalogPullupEnabled(static_cast<uint8_t>(i)));
+  }
+  writeGpioOutput(CAN_TERM_SWITCH_PIN, getCanTerminationEnabled());
+}
+
+static bool adsWriteRegister(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(OUTPUT_SENSE_I2C_ADDRESS);
+  Wire.write(reg);
+  Wire.write(static_cast<uint8_t>((value >> 8) & 0xFFU));
+  Wire.write(static_cast<uint8_t>(value & 0xFFU));
+  return Wire.endTransmission() == 0;
+}
+
+static bool adsReadRegister(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(OUTPUT_SENSE_I2C_ADDRESS);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(static_cast<int>(OUTPUT_SENSE_I2C_ADDRESS), 2) != 2) {
+    return false;
+  }
+  value = static_cast<uint16_t>((Wire.read() << 8) | Wire.read());
+  return true;
+}
+
+static void initOutputSenseAdc() {
+  Wire.begin();
+  Wire.setClock(400000);
+
+  uint16_t configReg = 0;
+  outputSenseReady = adsReadRegister(0x01, configReg);
+}
+
+static bool readOutputSenseRaw(uint8_t channel, int16_t &raw) {
+  if (!outputSenseReady || channel >= OUTPUT_SENSE_COUNT) {
+    raw = 0;
+    return false;
+  }
+
+  uint16_t configWord = static_cast<uint16_t>(0x8000U |
+                                              ((0x4U + channel) << 12) |
+                                              0x0100U |
+                                              0x00E0U |
+                                              0x0003U);
+  if (!adsWriteRegister(0x01, configWord)) {
+    outputSenseReady = false;
+    raw = 0;
+    return false;
+  }
+
+  for (int attempt = 0; attempt < 8; attempt++) {
+    delay(2);
+    uint16_t statusWord = 0;
+    if (!adsReadRegister(0x01, statusWord)) {
+      outputSenseReady = false;
+      raw = 0;
+      return false;
+    }
+    if ((statusWord & 0x8000U) != 0U) {
+      uint16_t conversion = 0;
+      if (!adsReadRegister(0x00, conversion)) {
+        outputSenseReady = false;
+        raw = 0;
+        return false;
+      }
+      raw = static_cast<int16_t>(conversion);
+      return true;
+    }
+  }
+
+  raw = 0;
+  return false;
+}
+
+static bool readOutputSenseVoltages(float outVoltages[OUTPUT_SENSE_COUNT], int16_t outRaw[OUTPUT_SENSE_COUNT]) {
+  bool allOk = outputSenseReady;
+  for (int i = 0; i < OUTPUT_SENSE_COUNT; i++) {
+    int16_t raw = 0;
+    bool ok = readOutputSenseRaw(OUTPUT_SENSE_CHANNELS[i], raw);
+    outRaw[i] = raw;
+    if (ok) {
+      float adcVolts = (static_cast<float>(raw) * OUTPUT_SENSE_FULL_SCALE_VOLTS) / 32767.0f;
+      outVoltages[i] = adcVolts * OUTPUT_SENSE_DIVIDER_RATIO;
+    } else {
+      outVoltages[i] = 0.0f;
+      allOk = false;
+    }
+  }
+  return allOk;
+}
+
+static void printOutputSenseVoltages() {
+  Serial.println("--- Output Voltage Sense (ADS1115) ---");
+  if (!outputSenseReady) {
+    Serial.println("ADS1115 not detected");
+    return;
+  }
+
+  float voltages[OUTPUT_SENSE_COUNT];
+  int16_t raw[OUTPUT_SENSE_COUNT];
+  bool ok = readOutputSenseVoltages(voltages, raw);
+  for (int i = 0; i < OUTPUT_SENSE_COUNT; i++) {
+    Serial.print("OUT");
+    Serial.print(i + 1);
+    Serial.print(": ADC=");
+    Serial.print(raw[i]);
+    Serial.print(" | V=");
+    Serial.print(voltages[i], 3);
+    Serial.println(" V");
+  }
+  if (!ok) {
+    Serial.println("WARN: One or more ADS1115 conversions failed");
   }
 }
 
@@ -511,7 +687,7 @@ void setDefaults(Config &cfg) {
   cfg.outFreqHz[2] = DEFAULT_PWM_FREQ_HZ;
   cfg.outFreqHz[3] = DEFAULT_PWM_FREQ_HZ;
   cfg.safeMask = 0x00;   // all outputs safe OFF
-  cfg.activeMask = 0x00; // active LOW by default
+  cfg.activeMask = 0x0F; // DTM2 outputs are active HIGH by default
   cfg.canMode = 0;
   cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
@@ -527,6 +703,16 @@ void saveConfig() {
 
 static void loadConfig() {
   EEPROM.get(0, config);
+  bool migrated = false;
+  if (config.magic == CONFIG_MAGIC && config.version == 2) {
+    config.version = CONFIG_VERSION;
+    config.activeMask = 0x0F;
+    config.safeMask &= 0x0F;
+    config.inputPullupMask &= 0x0F;
+    setAuxSwitchMask(getAuxSwitchMask() & AUX_SWITCH_MASK_ALL);
+    migrated = true;
+  }
+
   bool valid = (config.magic == CONFIG_MAGIC) && (config.version == CONFIG_VERSION);
   if (valid) {
     uint16_t crc = computeCrc(config);
@@ -542,8 +728,12 @@ static void loadConfig() {
       config.outFreqHz[p] = DEFAULT_PWM_FREQ_HZ;
     }
   }
+  setAuxSwitchMask(getAuxSwitchMask());
   if (getDiDebounceMs() > 100U) {
     setDiDebounceMs(DEFAULT_DI_DEBOUNCE_MS);
+  }
+  if (migrated) {
+    saveConfig();
   }
 }
 
@@ -743,29 +933,25 @@ bool setCanBitrate(uint16_t kbps) {
 
 // Re-initialise a single output GPT timer at a new frequency, then invalidate
 // the cached duty-cycle counts so that applyOutputs() re-applies the duty.
-static void reinitOutputTimer(FspTimer &timer, uint8_t gptChannel,
+static void reinitOutputTimer(FspTimer &timer,
+                              uint8_t gptChannel,
+                              TimerPWMChannel_t pwmChannel,
+                              uint16_t hz,
                               uint32_t &periodCounts,
-                              uint32_t &cachedCounts0, uint32_t &cachedCounts1) {
+                              uint32_t &cachedCounts) {
   timer.end();
   FspTimer::force_use_of_pwm_reserved_timer();
-  // Reload from the matching outputFreq[] slot (caller responsible for selecting correct Hz).
-  // We pass 50.0f initial duty just to open the timer; actual duty is applied below.
-  uint16_t hz = outputFreq[(gptChannel == 5) ? 0 : (gptChannel == 6) ? 2 : 4];
   timer.begin(TIMER_MODE_PWM, GPT_TIMER, gptChannel, hz, 50.0f);
   timer.add_pwm_extended_cfg();
-  timer.enable_pwm_channel(CHANNEL_B);
-  timer.enable_pwm_channel(CHANNEL_A);
+  timer.enable_pwm_channel(pwmChannel);
   timer.open();
-  timer.set_duty_cycle(0, CHANNEL_B);
-  timer.set_duty_cycle(0, CHANNEL_A);
+  timer.set_duty_cycle(0, pwmChannel);
   timer.start();
   periodCounts  = timer.get_period_raw();
-  // Invalidate cached counts so the duty section below re-applies them.
-  cachedCounts0 = 0xFFFFFFFFUL;
-  cachedCounts1 = 0xFFFFFFFFUL;
+  cachedCounts = 0xFFFFFFFFUL;
 }
 
-// Apply output values using hardware PWM (GPT4-GPT7)
+// Apply output values using hardware PWM (one channel per GPT on DTM2)
 void applyOutputs(bool useSafeState) {
   uint8_t newDuty[NUM_DIGITAL_OUT];
 
@@ -784,42 +970,37 @@ void applyOutputs(bool useSafeState) {
     newDuty[i] = duty;
   }
 
-  // Update hardware PWM frequency per GPT pair when it has changed.
-  // Each GPT timer drives two outputs that share the same period register.
-  // Use the even-indexed channel of each pair as the authoritative frequency.
-  //   GPT5 → DPO1-2 (outputFreq[0]), GPT6 → DPO3-4 (outputFreq[2]),
-  //   GPT7 → DPO5-6 (outputFreq[4]), GPT4 → DPO7-8 (outputFreq[6])
-  if (gpt5_out.is_opened() && outputFreq[0] != lastAppliedOutputFreqHz[0]) {
+  if (gpt6_out.is_opened() && outputFreq[0] != lastAppliedOutputFreqHz[0]) {
     if (rxDebug) {
-      Serial.print("[FREQ GPT5 "); Serial.print(lastAppliedOutputFreqHz[0]);
+      Serial.print("[FREQ OUT1 "); Serial.print(lastAppliedOutputFreqHz[0]);
       Serial.print("->"); Serial.print(outputFreq[0]); Serial.println("Hz]");
     }
-    reinitOutputTimer(gpt5_out, 5, gpt5PeriodCounts, lastAppliedPwmCounts[0], lastAppliedPwmCounts[1]);
+    reinitOutputTimer(gpt6_out, 6, CHANNEL_B, outputFreq[0], gpt6PeriodCounts, lastAppliedPwmCounts[0]);
     lastAppliedOutputFreqHz[0] = outputFreq[0];
   }
-  if (gpt6_out.is_opened() && outputFreq[2] != lastAppliedOutputFreqHz[1]) {
+  if (gpt5_out.is_opened() && outputFreq[1] != lastAppliedOutputFreqHz[1]) {
     if (rxDebug) {
-      Serial.print("[FREQ GPT6 "); Serial.print(lastAppliedOutputFreqHz[1]);
+      Serial.print("[FREQ OUT2 "); Serial.print(lastAppliedOutputFreqHz[1]);
+      Serial.print("->"); Serial.print(outputFreq[1]); Serial.println("Hz]");
+    }
+    reinitOutputTimer(gpt5_out, 5, CHANNEL_B, outputFreq[1], gpt5PeriodCounts, lastAppliedPwmCounts[1]);
+    lastAppliedOutputFreqHz[1] = outputFreq[1];
+  }
+  if (gpt4_out.is_opened() && outputFreq[2] != lastAppliedOutputFreqHz[2]) {
+    if (rxDebug) {
+      Serial.print("[FREQ OUT3 "); Serial.print(lastAppliedOutputFreqHz[2]);
       Serial.print("->"); Serial.print(outputFreq[2]); Serial.println("Hz]");
     }
-    reinitOutputTimer(gpt6_out, 6, gpt6PeriodCounts, lastAppliedPwmCounts[2], lastAppliedPwmCounts[3]);
-    lastAppliedOutputFreqHz[1] = outputFreq[2];
+    reinitOutputTimer(gpt4_out, 4, CHANNEL_A, outputFreq[2], gpt4PeriodCounts, lastAppliedPwmCounts[2]);
+    lastAppliedOutputFreqHz[2] = outputFreq[2];
   }
-  if (gpt7_out.is_opened() && outputFreq[4] != lastAppliedOutputFreqHz[2]) {
+  if (gpt7_out.is_opened() && outputFreq[3] != lastAppliedOutputFreqHz[3]) {
     if (rxDebug) {
-      Serial.print("[FREQ GPT7 "); Serial.print(lastAppliedOutputFreqHz[2]);
-      Serial.print("->"); Serial.print(outputFreq[4]); Serial.println("Hz]");
+      Serial.print("[FREQ OUT4 "); Serial.print(lastAppliedOutputFreqHz[3]);
+      Serial.print("->"); Serial.print(outputFreq[3]); Serial.println("Hz]");
     }
-    reinitOutputTimer(gpt7_out, 7, gpt7PeriodCounts, lastAppliedPwmCounts[4], lastAppliedPwmCounts[5]);
-    lastAppliedOutputFreqHz[2] = outputFreq[4];
-  }
-  if (gpt4_out.is_opened() && outputFreq[6] != lastAppliedOutputFreqHz[3]) {
-    if (rxDebug) {
-      Serial.print("[FREQ GPT4 "); Serial.print(lastAppliedOutputFreqHz[3]);
-      Serial.print("->"); Serial.print(outputFreq[6]); Serial.println("Hz]");
-    }
-    reinitOutputTimer(gpt4_out, 4, gpt4PeriodCounts, lastAppliedPwmCounts[6], lastAppliedPwmCounts[7]);
-    lastAppliedOutputFreqHz[3] = outputFreq[6];
+    reinitOutputTimer(gpt7_out, 7, CHANNEL_A, outputFreq[3], gpt7PeriodCounts, lastAppliedPwmCounts[3]);
+    lastAppliedOutputFreqHz[3] = outputFreq[3];
   }
 
   // Update hardware PWM using set_duty_cycle.
@@ -827,33 +1008,7 @@ void applyOutputs(bool useSafeState) {
   // logical duty to compare counts with (255 - duty).
   // Cap max to period-1 to ensure compare logic works properly.
   
-  // Channels 0-1: GPT5 (DPO1-2, GTIOC5B/5A)
-  if (gpt5_out.is_opened()) {
-    uint32_t period = gpt5PeriodCounts;
-    if (period < 2U) {
-      period = gpt5_out.get_period_raw();
-      gpt5PeriodCounts = period;
-    }
-    if (period < 2U) {
-      period = 2U;
-    }
-    uint32_t counts0 = (period * (uint32_t)(255U - newDuty[0])) / 255U;
-    uint32_t counts1 = (period * (uint32_t)(255U - newDuty[1])) / 255U;
-    if (counts0 >= period) counts0 = period - 1;
-    if (counts1 >= period) counts1 = period - 1;
-      if (lastAppliedPwmCounts[0] != counts0) {
-      if (rxDebug) { Serial.print("[PWM DPO1 "); Serial.print(lastAppliedPwmCounts[0]); Serial.print("->"); Serial.print(counts0); Serial.println("]"); }
-      gpt5_out.set_duty_cycle(counts0, CHANNEL_B);  // DPO1
-      lastAppliedPwmCounts[0] = counts0;
-    }
-    if (lastAppliedPwmCounts[1] != counts1) {
-      if (rxDebug) { Serial.print("[PWM DPO2 "); Serial.print(lastAppliedPwmCounts[1]); Serial.print("->"); Serial.print(counts1); Serial.println("]"); }
-      gpt5_out.set_duty_cycle(counts1, CHANNEL_A);  // DPO2
-      lastAppliedPwmCounts[1] = counts1;
-    }
-  }
-
-  // Channels 2-3: GPT6 (DPO3-4, GTIOC6B/6A)
+  // OUT1: GPT6B
   if (gpt6_out.is_opened()) {
     uint32_t period = gpt6PeriodCounts;
     if (period < 2U) {
@@ -863,49 +1018,35 @@ void applyOutputs(bool useSafeState) {
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts2 = (period * (uint32_t)(255U - newDuty[2])) / 255U;
-    uint32_t counts3 = (period * (uint32_t)(255U - newDuty[3])) / 255U;
-    if (counts2 >= period) counts2 = period - 1;
-    if (counts3 >= period) counts3 = period - 1;
-    if (lastAppliedPwmCounts[2] != counts2) {
-      if (rxDebug) { Serial.print("[PWM DPO3 "); Serial.print(lastAppliedPwmCounts[2]); Serial.print("->"); Serial.print(counts2); Serial.println("]"); }
-      gpt6_out.set_duty_cycle(counts2, CHANNEL_B);  // DPO3
-      lastAppliedPwmCounts[2] = counts2;
-    }
-    if (lastAppliedPwmCounts[3] != counts3) {
-      if (rxDebug) { Serial.print("[PWM DPO4 "); Serial.print(lastAppliedPwmCounts[3]); Serial.print("->"); Serial.print(counts3); Serial.println("]"); }
-      gpt6_out.set_duty_cycle(counts3, CHANNEL_A);  // DPO4
-      lastAppliedPwmCounts[3] = counts3;
+    uint32_t counts = (period * (uint32_t)(255U - newDuty[0])) / 255U;
+    if (counts >= period) counts = period - 1;
+    if (lastAppliedPwmCounts[0] != counts) {
+      if (rxDebug) { Serial.print("[PWM OUT1 "); Serial.print(lastAppliedPwmCounts[0]); Serial.print("->"); Serial.print(counts); Serial.println("]"); }
+      gpt6_out.set_duty_cycle(counts, CHANNEL_B);
+      lastAppliedPwmCounts[0] = counts;
     }
   }
 
-  // Channels 4-5: GPT7 (DPO5-6, GTIOC7A/7B)
-  if (gpt7_out.is_opened()) {
-    uint32_t period = gpt7PeriodCounts;
+  // OUT2: GPT5B
+  if (gpt5_out.is_opened()) {
+    uint32_t period = gpt5PeriodCounts;
     if (period < 2U) {
-      period = gpt7_out.get_period_raw();
-      gpt7PeriodCounts = period;
+      period = gpt5_out.get_period_raw();
+      gpt5PeriodCounts = period;
     }
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts4 = (period * (uint32_t)(255U - newDuty[4])) / 255U;
-    uint32_t counts5 = (period * (uint32_t)(255U - newDuty[5])) / 255U;
-    if (counts4 >= period) counts4 = period - 1;
-    if (counts5 >= period) counts5 = period - 1;
-    if (lastAppliedPwmCounts[4] != counts4) {
-      if (rxDebug) { Serial.print("[PWM DPO5 "); Serial.print(lastAppliedPwmCounts[4]); Serial.print("->"); Serial.print(counts4); Serial.println("]"); }
-      gpt7_out.set_duty_cycle(counts4, CHANNEL_A);  // DPO5
-      lastAppliedPwmCounts[4] = counts4;
-    }
-    if (lastAppliedPwmCounts[5] != counts5) {
-      if (rxDebug) { Serial.print("[PWM DPO6 "); Serial.print(lastAppliedPwmCounts[5]); Serial.print("->"); Serial.print(counts5); Serial.println("]"); }
-      gpt7_out.set_duty_cycle(counts5, CHANNEL_B);  // DPO6
-      lastAppliedPwmCounts[5] = counts5;
+    uint32_t counts = (period * (uint32_t)(255U - newDuty[1])) / 255U;
+    if (counts >= period) counts = period - 1;
+    if (lastAppliedPwmCounts[1] != counts) {
+      if (rxDebug) { Serial.print("[PWM OUT2 "); Serial.print(lastAppliedPwmCounts[1]); Serial.print("->"); Serial.print(counts); Serial.println("]"); }
+      gpt5_out.set_duty_cycle(counts, CHANNEL_B);
+      lastAppliedPwmCounts[1] = counts;
     }
   }
 
-  // Channels 6-7: GPT4 (DPO7-8, GTIOC4A/4B)
+  // OUT3: GPT4A
   if (gpt4_out.is_opened()) {
     uint32_t period = gpt4PeriodCounts;
     if (period < 2U) {
@@ -915,19 +1056,31 @@ void applyOutputs(bool useSafeState) {
     if (period < 2U) {
       period = 2U;
     }
-    uint32_t counts6 = (period * (uint32_t)(255U - newDuty[6])) / 255U;
-    uint32_t counts7 = (period * (uint32_t)(255U - newDuty[7])) / 255U;
-    if (counts6 >= period) counts6 = period - 1;
-    if (counts7 >= period) counts7 = period - 1;
-    if (lastAppliedPwmCounts[6] != counts6) {
-      if (rxDebug) { Serial.print("[PWM DPO7 "); Serial.print(lastAppliedPwmCounts[6]); Serial.print("->"); Serial.print(counts6); Serial.println("]"); }
-      gpt4_out.set_duty_cycle(counts6, CHANNEL_A);  // DPO7
-      lastAppliedPwmCounts[6] = counts6;
+    uint32_t counts = (period * (uint32_t)(255U - newDuty[2])) / 255U;
+    if (counts >= period) counts = period - 1;
+    if (lastAppliedPwmCounts[2] != counts) {
+      if (rxDebug) { Serial.print("[PWM OUT3 "); Serial.print(lastAppliedPwmCounts[2]); Serial.print("->"); Serial.print(counts); Serial.println("]"); }
+      gpt4_out.set_duty_cycle(counts, CHANNEL_A);
+      lastAppliedPwmCounts[2] = counts;
     }
-    if (lastAppliedPwmCounts[7] != counts7) {
-      if (rxDebug) { Serial.print("[PWM DPO8 "); Serial.print(lastAppliedPwmCounts[7]); Serial.print("->"); Serial.print(counts7); Serial.println("]"); }
-      gpt4_out.set_duty_cycle(counts7, CHANNEL_B);  // DPO8
-      lastAppliedPwmCounts[7] = counts7;
+  }
+
+  // OUT4: GPT7A
+  if (gpt7_out.is_opened()) {
+    uint32_t period = gpt7PeriodCounts;
+    if (period < 2U) {
+      period = gpt7_out.get_period_raw();
+      gpt7PeriodCounts = period;
+    }
+    if (period < 2U) {
+      period = 2U;
+    }
+    uint32_t counts = (period * (uint32_t)(255U - newDuty[3])) / 255U;
+    if (counts >= period) counts = period - 1;
+    if (lastAppliedPwmCounts[3] != counts) {
+      if (rxDebug) { Serial.print("[PWM OUT4 "); Serial.print(lastAppliedPwmCounts[3]); Serial.print("->"); Serial.print(counts); Serial.println("]"); }
+      gpt7_out.set_duty_cycle(counts, CHANNEL_A);
+      lastAppliedPwmCounts[3] = counts;
     }
   }
 }
@@ -938,8 +1091,8 @@ static bool pendingConfigSave = false;
 
 static void handleCanRx(const CanMsg &msg) {
   // Snapshot duty/freq so we can detect whether outputs actually changed
-  uint8_t  prevDuty[NUM_DIGITAL_OUT];
-  uint16_t prevFreq[NUM_DIGITAL_OUT];
+  uint8_t  prevDuty[OUTPUT_SLOT_COUNT];
+  uint16_t prevFreq[OUTPUT_SLOT_COUNT];
   memcpy(prevDuty, outputDuty, sizeof(prevDuty));
   memcpy(prevFreq, outputFreq, sizeof(prevFreq));
 
@@ -963,7 +1116,7 @@ static void handleCanRx(const CanMsg &msg) {
 
   // Restore any serial-overridden channels to their pre-CAN values
   // (CAN should not control channels under serial/app override)
-  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+  for (int i = 0; i < OUTPUT_SLOT_COUNT; i++) {
     if ((serialOverrideMask >> i) & 0x01) {
       outputDuty[i] = prevDuty[i];
       outputFreq[i] = prevFreq[i];
@@ -998,7 +1151,7 @@ static void handleCanRx(const CanMsg &msg) {
       else if (changed)       Serial.print("mask");
       else                    Serial.print("duty");
       Serial.print(" d=");
-      for (int _i = 0; _i < NUM_DIGITAL_OUT; _i++) {
+      for (int _i = 0; _i < OUTPUT_SLOT_COUNT; _i++) {
         if (_i) Serial.print(',');
         Serial.print(outputDuty[_i]);
       }
@@ -1209,10 +1362,10 @@ static void printDiag() {
 
   // GPT capture timer diagnostics
   struct { FspTimer *timer; CaptureCtx *ctx; uint8_t ch; const char *label; } timers[] = {
-    {&gpt0, &gpt0Ctx, 0, "GPT0 (DI5-A, DI4-B)"},
+    {&gpt0, &gpt0Ctx, 0, "GPT0 (DI4-B)"},
     {&gpt1, &gpt1Ctx, 1, "GPT1 (DI3-A, DI2-B)"},
-    {&gpt2, &gpt2Ctx, 2, "GPT2 (DI6-A, DI1-B)"},
-    {&gpt3, &gpt3Ctx, 3, "GPT3 (DI8-A, DI7-B)"},
+    {&gpt2, &gpt2Ctx, 2, "GPT2 (DI1-B)"},
+    {&gpt3, &gpt3Ctx, 3, "GPT3 (unused)"},
   };
   for (auto &t : timers) {
     const timer_cfg_t *tmrCfg = t.timer->get_cfg();
@@ -1273,7 +1426,7 @@ static void printDiag() {
     uint8_t port = DIGITAL_OUT_PINS[i] >> 8;
     uint8_t pin = DIGITAL_OUT_PINS[i] & 0xFF;
     uint32_t pfs = R_PFS->PORT[port].PIN[pin].PmnPFS;
-    Serial.print("DPO"); Serial.print(i + 1);
+    Serial.print("OUT"); Serial.print(i + 1);
     Serial.print(" ("); Serial.print(DIGITAL_OUT_PORT_NAMES[i]);
     Serial.print("): PFS=0x"); Serial.print(pfs, HEX);
     Serial.print(" PDR="); Serial.print((pfs >> 2) & 1);
@@ -1321,14 +1474,18 @@ static void printHelp() {
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
-  Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-8)");
-  Serial.println("  OUTFREQ <ch> <hz>       - Set pair PWM freq via channel (1-8): 1-2/GPT5, 3-4/GPT6, 5-6/GPT7, 7-8/GPT4");
+  Serial.println("  OUT <ch> <duty%>        - Set output duty 0-100% (1-4)");
+  Serial.println("  OUTFREQ <ch> <hz>       - Set output PWM freq (1-4)");
   Serial.println("  CONFIG                 - Print stored configuration");
   Serial.println("  SERIALOVERRIDE <mask>  - Set serial override mask (0x00-0xFF)");
-  Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-8)");
-  Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-8)");
-  Serial.println("  DIPULLUP <ch> <0|1>      - Set DI internal pull-up (1-8)");
-  Serial.println("  DIPULLUPMASK <hex>       - Set DI pull-up bitmask (bit0=DI1..bit7=DI8)");
+  Serial.println("  SAFE <ch> <0|1>         - Set safe state for output (1-4)");
+  Serial.println("  ACTIVE <ch> <LOW|HIGH>  - Set active state for output (1-4)");
+  Serial.println("  DIPULLUP <ch> <0|1>      - Set DI internal pull-up (1-4)");
+  Serial.println("  DIPULLUPMASK <hex>       - Set DI pull-up bitmask (bit0=DI1..bit3=DI4)");
+  Serial.println("  AIPULLUP <ch> <0|1>      - Set external analog pull-up (AV1-AV4)");
+  Serial.println("  AIPULLUPMASK <hex>       - Set external analog pull-up bitmask");
+  Serial.println("  CANTERM <0|1>            - Enable or disable CAN termination");
+  Serial.println("  OUTVOLT                 - Print output voltage sense readings");
   Serial.println("  DIDEBOUNCE <ms>          - Set DI state debounce (0-100 ms)");
   Serial.println("  DEFAULTS                - Reset all config to factory defaults");
   Serial.println();
@@ -1442,7 +1599,7 @@ static void printStatusOnce() {
     bool pinState  = readDigitalOut(i);
     bool safeOn    = (config.safeMask   >> i) & 0x01;
     bool activeHigh= (config.activeMask >> i) & 0x01;
-    Serial.print("DPO");
+    Serial.print("OUT");
     Serial.print(i + 1);
     Serial.print(" (");
     Serial.print(DIGITAL_OUT_PORT_NAMES[i]);
@@ -1458,18 +1615,32 @@ static void printStatusOnce() {
     Serial.print(safeOn ? "ON " : "OFF");
     Serial.print("  drv=");
     switch (i) {
-      case 0: Serial.print("GPT5B"); break;  // DPO1 -> P408
-      case 1: Serial.print("GPT5A"); break;  // DPO2 -> P409
-      case 2: Serial.print("GPT6B"); break;  // DPO3 -> P410
-      case 3: Serial.print("GPT6A"); break;  // DPO4 -> P411
-      case 4: Serial.print("GPT7A"); break;  // DPO5 -> P304
-      case 5: Serial.print("GPT7B"); break;  // DPO6 -> P303
-      case 6: Serial.print("GPT4A"); break;  // DPO7 -> P302
-      case 7: Serial.print("GPT4B"); break;  // DPO8 -> P301
+      case 0: Serial.print("GPT6B"); break;  // OUT1 -> P410
+      case 1: Serial.print("GPT5B"); break;  // OUT2 -> P408
+      case 2: Serial.print("GPT4A"); break;  // OUT3 -> P302
+      case 3: Serial.print("GPT7A"); break;  // OUT4 -> P304
       default: Serial.print("--"); break;
     }
     Serial.println();
   }
+
+  Serial.println();
+  Serial.println("--- Auxiliary Switches ---");
+  for (int i = 0; i < NUM_ANALOG_PULLUP_SWITCHES; i++) {
+    Serial.print("AV");
+    Serial.print(i + 1);
+    Serial.print(" Pull-up (");
+    Serial.print(ANALOG_PULLUP_SWITCH_PORT_NAMES[i]);
+    Serial.print("): ");
+    Serial.println(getAnalogPullupEnabled(static_cast<uint8_t>(i)) ? "ON" : "OFF");
+  }
+  Serial.print("CAN Term (");
+  Serial.print(CAN_TERM_SWITCH_PORT_NAME);
+  Serial.print("): ");
+  Serial.println(getCanTerminationEnabled() ? "ON" : "OFF");
+
+  Serial.println();
+  printOutputSenseVoltages();
 
   Serial.println("\n============================");
 }
@@ -1502,19 +1673,23 @@ static void printConfig() {
   Serial.println(config.activeMask, HEX);
   Serial.print("DI Pullup Mask: 0x");
   Serial.println(config.inputPullupMask, HEX);
+  Serial.print("AI Pullup Mask: 0x");
+  Serial.println(getAuxSwitchMask() & 0x0F, HEX);
+  Serial.print("CAN Termination: ");
+  Serial.println(getCanTerminationEnabled() ? "ON" : "OFF");
   Serial.print("DI Debounce: ");
   Serial.print(getDiDebounceMs());
   Serial.println(" ms");
-  Serial.print("Out Freq Pair 1 (DPO1-2, GPT5): ");
+  Serial.print("OUT1 Freq: ");
   Serial.print(config.outFreqHz[0]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 2 (DPO3-4, GPT6): ");
+  Serial.print("OUT2 Freq: ");
   Serial.print(config.outFreqHz[1]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 3 (DPO5-6, GPT7): ");
+  Serial.print("OUT3 Freq: ");
   Serial.print(config.outFreqHz[2]);
   Serial.println(" Hz");
-  Serial.print("Out Freq Pair 4 (DPO7-8, GPT4): ");
+  Serial.print("OUT4 Freq: ");
   Serial.print(config.outFreqHz[3]);
   Serial.println(" Hz");
   Serial.print("CRC: 0x");
@@ -1605,9 +1780,9 @@ static void handleSerial() {
       setDefaults(config);
       saveConfig();
       for (int p = 0; p < 4; p++) {
-        outputFreq[p * 2]     = config.outFreqHz[p];
-        outputFreq[p * 2 + 1] = config.outFreqHz[p];
+        outputFreq[p] = config.outFreqHz[p];
       }
+      applyAuxSwitchStates();
       applyOutputs(outputsInSafeState);
       sendJsonResponse(true, "Defaults restored");
       return;
@@ -1643,11 +1818,10 @@ static void handleSerial() {
   if (cmd == "DEFAULTS") {
     setDefaults(config);
     saveConfig();
-    // Reload output frequencies from fresh defaults
     for (int p = 0; p < 4; p++) {
-      outputFreq[p * 2]     = config.outFreqHz[p];
-      outputFreq[p * 2 + 1] = config.outFreqHz[p];
+      outputFreq[p] = config.outFreqHz[p];
     }
+    applyAuxSwitchStates();
     applyOutputs(outputsInSafeState);
     Serial.println("OK: Config reset to defaults");
     return;
@@ -1815,23 +1989,16 @@ static void handleSerial() {
   if (cmd.startsWith("OUTFREQ")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     uint16_t hz = static_cast<uint16_t>(getArg(2).toInt());
-    if (ch < 1 || ch > 8 || hz == 0) {
-      Serial.println("ERR: OUTFREQ <ch 1-8> <hz>");
+    if (ch < 1 || ch > 4 || hz == 0) {
+      Serial.println("ERR: OUTFREQ <ch 1-4> <hz>");
       return;
     }
-    // Persist as pair frequency (pairs share EEPROM slot and a single GPT timer).
-    // Update both channels of the pair so applyOutputs() picks up the change
-    // regardless of which channel in the pair was specified.
-    uint8_t pair = (ch - 1) / 2;
-    config.outFreqHz[pair] = hz;
+    config.outFreqHz[ch - 1] = hz;
     saveConfig();
-    outputFreq[pair * 2]     = hz;
-    outputFreq[pair * 2 + 1] = hz;
+    outputFreq[ch - 1] = hz;
     applyOutputs(outputsInSafeState);
-    Serial.print("OK: DPO");
-    Serial.print(pair * 2 + 1);
-    Serial.print("-");
-    Serial.print(pair * 2 + 2);
+    Serial.print("OK: OUT");
+    Serial.print(ch);
     Serial.print(" freq=");
     Serial.print(hz);
     Serial.println(" Hz");
@@ -1841,12 +2008,12 @@ static void handleSerial() {
   if (cmd.startsWith("SAFE")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     uint8_t val = static_cast<uint8_t>(getArg(2).toInt());
-    if (ch < 1 || ch > 8) {
-      Serial.println("ERR: SAFE <1-8> <0|1>");
+    if (ch < 1 || ch > 4) {
+      Serial.println("ERR: SAFE <1-4> <0|1>");
       return;
     }
     if (val > 1) {
-      Serial.println("ERR: SAFE <1-8> <0|1>");
+      Serial.println("ERR: SAFE <1-4> <0|1>");
       return;
     }
     uint8_t mask = 1 << (ch - 1);
@@ -1863,7 +2030,7 @@ static void handleSerial() {
       Serial.println("ERR: DIPULLUPMASK <hex>");
       return;
     }
-    uint8_t mask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0));
+    uint8_t mask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0) & 0x0F);
     config.inputPullupMask = mask;
     applyInputPullups();
     saveConfig();
@@ -1875,8 +2042,8 @@ static void handleSerial() {
   if (cmd.startsWith("DIPULLUP")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     uint8_t val = static_cast<uint8_t>(getArg(2).toInt());
-    if (ch < 1 || ch > 8 || val > 1) {
-      Serial.println("ERR: DIPULLUP <1-8> <0|1>");
+    if (ch < 1 || ch > 4 || val > 1) {
+      Serial.println("ERR: DIPULLUP <1-4> <0|1>");
       return;
     }
     uint8_t mask = static_cast<uint8_t>(1U << (ch - 1U));
@@ -1890,11 +2057,71 @@ static void handleSerial() {
     return;
   }
 
+  if (cmd.startsWith("AIPULLUPMASK")) {
+    String arg = getArg(1);
+    if (arg.length() == 0) {
+      Serial.println("ERR: AIPULLUPMASK <hex>");
+      return;
+    }
+    uint8_t auxMask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0) & 0x0F);
+    setAuxSwitchMask(static_cast<uint8_t>((getAuxSwitchMask() & AUX_SWITCH_CAN_TERM) | auxMask));
+    applyAuxSwitchStates();
+    saveConfig();
+    Serial.print("OK: AI pull-up mask=0x");
+    Serial.println(getAuxSwitchMask() & 0x0F, HEX);
+    return;
+  }
+
+  if (cmd.startsWith("AIPULLUP")) {
+    uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
+    uint8_t val = static_cast<uint8_t>(getArg(2).toInt());
+    if (ch < 1 || ch > 4 || val > 1) {
+      Serial.println("ERR: AIPULLUP <1-4> <0|1>");
+      return;
+    }
+    uint8_t mask = static_cast<uint8_t>(1U << (ch - 1U));
+    uint8_t newMask = getAuxSwitchMask();
+    newMask = static_cast<uint8_t>((newMask & ~mask) | (val ? mask : 0U));
+    setAuxSwitchMask(newMask);
+    applyAuxSwitchStates();
+    saveConfig();
+    Serial.print("OK: AV");
+    Serial.print(ch);
+    Serial.print(" pull-up ");
+    Serial.println(val ? "ON" : "OFF");
+    return;
+  }
+
+  if (cmd.startsWith("CANTERM")) {
+    uint8_t val = static_cast<uint8_t>(getArg(1).toInt());
+    if (val > 1) {
+      Serial.println("ERR: CANTERM <0|1>");
+      return;
+    }
+    uint8_t newMask = getAuxSwitchMask();
+    if (val != 0U) {
+      newMask |= AUX_SWITCH_CAN_TERM;
+    } else {
+      newMask &= static_cast<uint8_t>(~AUX_SWITCH_CAN_TERM);
+    }
+    setAuxSwitchMask(newMask);
+    applyAuxSwitchStates();
+    saveConfig();
+    Serial.print("OK: CAN termination ");
+    Serial.println(val ? "ON" : "OFF");
+    return;
+  }
+
+  if (cmd == "OUTVOLT") {
+    printOutputSenseVoltages();
+    return;
+  }
+
   if (cmd.startsWith("OUT ") && !cmd.startsWith("OUTFREQ")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     int pct = getArg(2).toInt();
-    if (ch < 1 || ch > 8 || pct < 0 || pct > 100) {
-      Serial.println("ERR: OUT <1-8> <0-100>");
+    if (ch < 1 || ch > 4 || pct < 0 || pct > 100) {
+      Serial.println("ERR: OUT <1-4> <0-100>");
       return;
     }
     outputDuty[ch - 1] = static_cast<uint8_t>((pct * 255 + 50) / 100);
@@ -1903,7 +2130,7 @@ static void handleSerial() {
     outputsInSafeState = false;
     lastCanRxMs = millis();
     applyOutputs(false);
-    Serial.print("OK: DPO"); Serial.print(ch);
+    Serial.print("OK: OUT"); Serial.print(ch);
     Serial.print(" = "); Serial.print(pct); Serial.println("%");
     Serial.print("INFO: Serial override enabled for channel "); Serial.println(ch);
     return;
@@ -1923,12 +2150,12 @@ static void handleSerial() {
   if (cmd.startsWith("ACTIVE")) {
     uint8_t ch = static_cast<uint8_t>(getArg(1).toInt());
     String val = getArg(2);
-    if (ch < 1 || ch > 8) {
-      Serial.println("ERR: ACTIVE <1-8> <LOW|HIGH>");
+    if (ch < 1 || ch > 4) {
+      Serial.println("ERR: ACTIVE <1-4> <LOW|HIGH>");
       return;
     }
     if (val != "LOW" && val != "HIGH") {
-      Serial.println("ERR: ACTIVE <1-8> <LOW|HIGH>");
+      Serial.println("ERR: ACTIVE <1-4> <LOW|HIGH>");
       return;
     }
     uint8_t mask = 1 << (ch - 1);
@@ -1946,84 +2173,69 @@ static void handleSerial() {
   Serial.println("ERR: Unknown command. Type HELP");
 }
 
-// Initialize hardware PWM using GPT4-GPT7 for all 8 digital outputs
+// Initialize hardware PWM using one channel on GPT4-GPT7 for OUT1-OUT4
 static void initHardwarePwm() {
-  // Use per-pair frequencies already loaded from config into outputFreq[].
-  // Pairs: DPO1-2 → outputFreq[0] (GPT5), DPO3-4 → outputFreq[2] (GPT6),
-  //        DPO5-6 → outputFreq[4] (GPT7), DPO7-8 → outputFreq[6] (GPT4).
-  uint32_t freqGpt5 = outputFreq[0];
-  uint32_t freqGpt6 = outputFreq[2];
-  uint32_t freqGpt7 = outputFreq[4];
-  uint32_t freqGpt4 = outputFreq[6];
-  
-  // GPT5: Channels 0-1 (DPO1-2, P408-P409)
-  configureGptPeripheral(DIGITAL_OUT_PINS[0]);  // P408 - DPO1
-  configureGptPeripheral(DIGITAL_OUT_PINS[1]);  // P409 - DPO2
-  FspTimer::force_use_of_pwm_reserved_timer();
-  gpt5_out.begin(TIMER_MODE_PWM, GPT_TIMER, 5, freqGpt5, 50.0f);
-  gpt5_out.add_pwm_extended_cfg();
-  gpt5_out.enable_pwm_channel(CHANNEL_B);  // DPO1 on GTIOC5B
-  gpt5_out.enable_pwm_channel(CHANNEL_A);  // DPO2 on GTIOC5A
-  gpt5_out.open();
-  gpt5_out.set_duty_cycle(0, CHANNEL_B);  // Initialize to 0% duty
-  gpt5_out.set_duty_cycle(0, CHANNEL_A);
-  gpt5_out.start();
-  gpt5PeriodCounts = gpt5_out.get_period_raw();
-  lastAppliedOutputFreqHz[0] = static_cast<uint16_t>(freqGpt5);
+  uint32_t freqOut1 = outputFreq[0];
+  uint32_t freqOut2 = outputFreq[1];
+  uint32_t freqOut3 = outputFreq[2];
+  uint32_t freqOut4 = outputFreq[3];
 
-  // GPT6: Channels 2-3 (DPO3-4, P410-P411)
-  configureGptPeripheral(DIGITAL_OUT_PINS[2]);  // P410 - DPO3
-  configureGptPeripheral(DIGITAL_OUT_PINS[3]);  // P411 - DPO4
+  // OUT1: GPT6B on P410
+  configureGptPeripheral(DIGITAL_OUT_PINS[0]);
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt6_out.begin(TIMER_MODE_PWM, GPT_TIMER, 6, freqGpt6, 50.0f);
+  gpt6_out.begin(TIMER_MODE_PWM, GPT_TIMER, 6, freqOut1, 50.0f);
   gpt6_out.add_pwm_extended_cfg();
-  gpt6_out.enable_pwm_channel(CHANNEL_B);  // DPO3 on GTIOC6B
-  gpt6_out.enable_pwm_channel(CHANNEL_A);  // DPO4 on GTIOC6A
+  gpt6_out.enable_pwm_channel(CHANNEL_B);
   gpt6_out.open();
-  gpt6_out.set_duty_cycle(0, CHANNEL_B);  // Initialize to 0% duty
-  gpt6_out.set_duty_cycle(0, CHANNEL_A);
+  gpt6_out.set_duty_cycle(0, CHANNEL_B);
   gpt6_out.start();
   gpt6PeriodCounts = gpt6_out.get_period_raw();
-  lastAppliedOutputFreqHz[1] = static_cast<uint16_t>(freqGpt6);
+  lastAppliedOutputFreqHz[0] = static_cast<uint16_t>(freqOut1);
 
-  // GPT7: Channels 4-5 (DPO5-6, P304-P303)
-  configureGptPeripheral(DIGITAL_OUT_PINS[4]);  // P304 - DPO5
-  configureGptPeripheral(DIGITAL_OUT_PINS[5]);  // P303 - DPO6
+  // OUT2: GPT5B on P408
+  configureGptPeripheral(DIGITAL_OUT_PINS[1]);
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt7_out.begin(TIMER_MODE_PWM, GPT_TIMER, 7, freqGpt7, 50.0f);
-  gpt7_out.add_pwm_extended_cfg();
-  gpt7_out.enable_pwm_channel(CHANNEL_A);  // DPO5 on GTIOC7A
-  gpt7_out.enable_pwm_channel(CHANNEL_B);  // DPO6 on GTIOC7B
-  gpt7_out.open();
-  gpt7_out.set_duty_cycle(0, CHANNEL_A);  // Initialize to 0% duty
-  gpt7_out.set_duty_cycle(0, CHANNEL_B);
-  gpt7_out.start();
-  gpt7PeriodCounts = gpt7_out.get_period_raw();
-  lastAppliedOutputFreqHz[2] = static_cast<uint16_t>(freqGpt7);
+  gpt5_out.begin(TIMER_MODE_PWM, GPT_TIMER, 5, freqOut2, 50.0f);
+  gpt5_out.add_pwm_extended_cfg();
+  gpt5_out.enable_pwm_channel(CHANNEL_B);
+  gpt5_out.open();
+  gpt5_out.set_duty_cycle(0, CHANNEL_B);
+  gpt5_out.start();
+  gpt5PeriodCounts = gpt5_out.get_period_raw();
+  lastAppliedOutputFreqHz[1] = static_cast<uint16_t>(freqOut2);
 
-  // GPT4: Channels 6-7 (DPO7-8, P302-P301)
-  configureGptPeripheral(DIGITAL_OUT_PINS[6]);  // P302 - DPO7
-  configureGptPeripheral(DIGITAL_OUT_PINS[7]);  // P301 - DPO8
+  // OUT3: GPT4A on P302
+  configureGptPeripheral(DIGITAL_OUT_PINS[2]);
   FspTimer::force_use_of_pwm_reserved_timer();
-  gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, freqGpt4, 50.0f);
+  gpt4_out.begin(TIMER_MODE_PWM, GPT_TIMER, 4, freqOut3, 50.0f);
   gpt4_out.add_pwm_extended_cfg();
-  gpt4_out.enable_pwm_channel(CHANNEL_A);  // DPO7 on GTIOC4A
-  gpt4_out.enable_pwm_channel(CHANNEL_B);  // DPO8 on GTIOC4B
+  gpt4_out.enable_pwm_channel(CHANNEL_A);
   gpt4_out.open();
-  gpt4_out.set_duty_cycle(0, CHANNEL_A);  // Initialize to 0% duty
-  gpt4_out.set_duty_cycle(0, CHANNEL_B);
+  gpt4_out.set_duty_cycle(0, CHANNEL_A);
   gpt4_out.start();
   gpt4PeriodCounts = gpt4_out.get_period_raw();
-  lastAppliedOutputFreqHz[3] = static_cast<uint16_t>(freqGpt4);
+  lastAppliedOutputFreqHz[2] = static_cast<uint16_t>(freqOut3);
 
-  Serial.print("[HW PWM] GPT5=");
-  Serial.print(freqGpt5);
-  Serial.print("Hz GPT6=");
-  Serial.print(freqGpt6);
-  Serial.print("Hz GPT7=");
-  Serial.print(freqGpt7);
-  Serial.print("Hz GPT4=");
-  Serial.print(freqGpt4);
+  // OUT4: GPT7A on P304
+  configureGptPeripheral(DIGITAL_OUT_PINS[3]);
+  FspTimer::force_use_of_pwm_reserved_timer();
+  gpt7_out.begin(TIMER_MODE_PWM, GPT_TIMER, 7, freqOut4, 50.0f);
+  gpt7_out.add_pwm_extended_cfg();
+  gpt7_out.enable_pwm_channel(CHANNEL_A);
+  gpt7_out.open();
+  gpt7_out.set_duty_cycle(0, CHANNEL_A);
+  gpt7_out.start();
+  gpt7PeriodCounts = gpt7_out.get_period_raw();
+  lastAppliedOutputFreqHz[3] = static_cast<uint16_t>(freqOut4);
+
+  Serial.print("[HW PWM] OUT1=");
+  Serial.print(freqOut1);
+  Serial.print("Hz OUT2=");
+  Serial.print(freqOut2);
+  Serial.print("Hz OUT3=");
+  Serial.print(freqOut3);
+  Serial.print("Hz OUT4=");
+  Serial.print(freqOut4);
   Serial.println("Hz");
 }
 
@@ -2031,10 +2243,9 @@ static void initCaptureInputs() {
   // Configure pins for GPT input capture and current pull-up mask
   applyInputPullups();
 
-  initCaptureTimer(gpt0, gpt0Ctx, 0, 4, 3); // GPT0: A=DI5, B=DI4
+  initCaptureTimer(gpt0, gpt0Ctx, 0, 4, 3); // GPT0: B=DI4, A unused
   initCaptureTimer(gpt1, gpt1Ctx, 1, 2, 1); // GPT1: A=DI3, B=DI2
-  initCaptureTimer(gpt2, gpt2Ctx, 2, 5, 0); // GPT2: A=DI6, B=DI1
-  initCaptureTimer(gpt3, gpt3Ctx, 3, 7, 6); // GPT3: A=DI8, B=DI7
+  initCaptureTimer(gpt2, gpt2Ctx, 2, 5, 0); // GPT2: B=DI1, A unused
 
   // Force-enable NVIC for all capture IRQs and cycle-end IRQs.
   // IRQManager::addTimerCompareCaptureA/B allocates the IELSR slot and ISR
@@ -2043,7 +2254,7 @@ static void initCaptureInputs() {
   // slot) ends up with NVIC disabled in practice.  Explicitly enabling
   // all capture and cycle-end IRQs here is a safe no-op for already-enabled
   // ones and fixes the GPT0-A case.
-  FspTimer *capTimers[] = {&gpt0, &gpt1, &gpt2, &gpt3};
+  FspTimer *capTimers[] = {&gpt0, &gpt1, &gpt2};
   for (auto *t : capTimers) {
     auto *ext = static_cast<gpt_extended_cfg_t *>(const_cast<void *>(t->get_cfg()->p_extend));
     if (ext->capture_a_irq >= 0) NVIC_EnableIRQ((IRQn_Type)ext->capture_a_irq);
@@ -2060,10 +2271,13 @@ void setup() {
   analogReadResolution(ADC_RESOLUTION);
 
   loadConfig();
+  initAuxSwitchOutputs();
+  applyAuxSwitchStates();
+  initOutputSenseAdc();
 
   initAdc();
 
-  for (int i = 0; i < NUM_DIGITAL_IN; i++) {
+  for (int i = 0; i < DI_SLOT_COUNT; i++) {
     diLastRise[i]         = 0;
     diLastRiseOverflow[i] = 0;
     diHasFirstRise[i]     = false;
@@ -2078,14 +2292,13 @@ void setup() {
   }
 
   // Initialize output state arrays
-  for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
+  for (int i = 0; i < OUTPUT_SLOT_COUNT; i++) {
     outputDuty[i] = 0;
     outputFreq[i] = DEFAULT_PWM_FREQ_HZ;
   }
-  // Load per-pair frequencies from stored config
+  // Load per-output frequencies from stored config
   for (int p = 0; p < 4; p++) {
-    outputFreq[p * 2]     = config.outFreqHz[p];
-    outputFreq[p * 2 + 1] = config.outFreqHz[p];
+    outputFreq[p] = config.outFreqHz[p];
   }
 
   initHardwarePwm();
@@ -2138,7 +2351,7 @@ void loop() {
     // Then text banner for CLI users
     Serial.println();
     Serial.println("============================================");
-    Serial.println("      PT-IO-Mini2  CAN I/O Expander");
+    Serial.println("      PT-IO-DTM2  CAN I/O Expander");
     Serial.print  ("      FW v");
     Serial.print  (FW_VERSION, HEX);
     Serial.print  ("  CAN Mode: ");

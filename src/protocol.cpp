@@ -45,8 +45,8 @@ void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
   capabilities.add("config");
   
   doc["analogChannels"] = 8;
-  doc["digitalIn"] = 8;
-  doc["digitalOut"] = 8;
+  doc["digitalIn"] = 4;
+  doc["digitalOut"] = 4;
   
   serializeJson(doc, Serial);
   Serial.println();
@@ -245,8 +245,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t ch = doc["ch"] | 0;
     int duty = doc["duty"] | -1;
     
-    if (ch < 1 || ch > 8) {
-      return {false, "Channel must be 1-8"};
+    if (ch < 1 || ch > 4) {
+      return {false, "Channel must be 1-4"};
     }
     if (duty < 0 || duty > 100) {
       return {false, "Duty must be 0-100"};
@@ -265,18 +265,15 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t ch = doc["ch"] | 0;
     uint16_t freq = doc["freq"] | 0;
     
-    if (ch < 1 || ch > 8) {
-      return {false, "Channel must be 1-8"};
+    if (ch < 1 || ch > 4) {
+      return {false, "Channel must be 1-4"};
     }
     if (freq == 0) {
       return {false, "Frequency must be > 0"};
     }
     
-    // Update pair frequency
-    uint8_t pair = (ch - 1) / 2;
-    config.outFreqHz[pair] = freq;
-    outputFreq[pair * 2] = freq;
-    outputFreq[pair * 2 + 1] = freq;
+    config.outFreqHz[ch - 1] = freq;
+    outputFreq[ch - 1] = freq;
     configChanged = true;
     outputsChanged = true;
     
@@ -288,8 +285,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t ch = doc["ch"] | 0;
     bool val = doc["value"] | false;
     
-    if (ch < 1 || ch > 8) {
-      return {false, "Channel must be 1-8"};
+    if (ch < 1 || ch > 4) {
+      return {false, "Channel must be 1-4"};
     }
     
     uint8_t mask = 1 << (ch - 1);
@@ -306,8 +303,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t ch = doc["ch"] | 0;
     bool activeHigh = doc["activeHigh"] | false;
     
-    if (ch < 1 || ch > 8) {
-      return {false, "Channel must be 1-8"};
+    if (ch < 1 || ch > 4) {
+      return {false, "Channel must be 1-4"};
     }
     
     uint8_t mask = 1 << (ch - 1);
@@ -324,8 +321,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t ch = doc["ch"] | 0;
     bool enabled = doc["enabled"] | false;
     
-    if (ch < 1 || ch > 8) {
-      return {false, "Channel must be 1-8"};
+    if (ch < 1 || ch > 4) {
+      return {false, "Channel must be 1-4"};
     }
     
     uint8_t mask = 1 << (ch - 1);
@@ -445,8 +442,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
       uint8_t ch = doc["ch"] | 0;
       bool enabled = doc["enabled"] | false;
       
-      if (ch < 1 || ch > 8) {
-        return {false, "Channel must be 1-8"};
+      if (ch < 1 || ch > 4) {
+        return {false, "Channel must be 1-4"};
       }
       
       uint8_t bit = 1 << (ch - 1);

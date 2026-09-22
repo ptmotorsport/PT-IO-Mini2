@@ -1,84 +1,76 @@
-# PT-IO-Mini2 — MCU Pinout (Rev 2)
+# PT-IO-DTM2 — MCU Pinout
 
 Renesas RA4M1 (R7FA4M1AB3CFM) — 48-pin LQFP  
-Custom PCB, all MCU pins routable.
-
-## Changes from Rev 1 (Prototype)
-
-| Signal | Rev 1 Pin | Rev 2 Pin | Reason |
-|--------|-----------|-----------|--------|
-| DI1    | P107 | **P501** | Updated digital input routing |
-| DI2    | P106 | **P104** | Updated digital input routing |
-| DI3    | P105 | **P105** | No change |
-| DI4    | P104 | **P106** | Updated digital input routing |
-| DI5    | P113 | **P107** | Updated digital input routing |
-| DI6    | P501 | **P113** | Updated digital input routing |
-| DI7    | P111 | **P112** | Updated digital input routing |
-| DI8    | P112 | **P111** | Updated digital input routing |
-| DPO1   | P302 | **P408** | Updated digital output routing |
-| DPO2   | P301 | **P409** | Updated digital output routing |
-| DPO3   | P408 | **P410** | Updated digital output routing |
-| DPO4   | P409 | **P411** | Updated digital output routing |
-| DPO5   | P410 | **P304** | Updated digital output routing |
-| DPO6   | P411 | **P303** | Updated digital output routing |
-| DPO7   | P303 (GPT7B) | **P302** (GPT4A) | Updated digital output routing |
-| DPO8   | P304 (GPT7A) | **P301** (GPT4B) | Updated digital output routing |
-| NEO.   | P109 | **P400** | Improved routing on PCB |
-
-Analog assignments unchanged.
+DTM2 branch derived from PT-IO-Mini2 main, with 4 physical PWM outputs, 4 digital inputs, switchable analog pull-ups, switchable CAN termination, and an added ADS1115 for output voltage sensing.
 
 ---
 
+## Arduino Pin Map
+
+| Arduino Pin | MCU Pin | DTM2 Function |
+|-------------|---------|---------------|
+| D0          | P301    | Pull-up Resistor Switch 4 |
+| D1          | P302    | OUT3 |
+| D2          | P105    | DI3 |
+| D3          | P104    | DI2 |
+| D4          | P103    | CAN TX |
+| D5          | P102    | CAN RX |
+| D6          | P106    | DI4 |
+| D7          | P107    | NC |
+| D8          | P304    | OUT4 |
+| D9          | P303    | Pull-up Resistor Switch 3 |
+| D10         | P112    | NeoPixel Output |
+| D11         | P109    | NC |
+| D12         | P110    | NC |
+| D13         | P111    | Built-in LED |
+| A0          | P014    | AVI3 |
+| A1          | P000    | AVI8 |
+| A2          | P001    | AVI7 |
+| A3          | P002    | AVI6 |
+| A4          | P101    | I2C SDA |
+| A5          | P100    | I2C SCL |
+
 ## Analog Inputs (8) — ADC Unit 0
+
+Firmware keeps the logical AV1-AV8 names, but DTM2 routes them differently from the older Mini2 board.
 
 | Signal | MCU Pin | ADC Channel | Notes |
 |--------|---------|-------------|-------|
-| AV1    | P000    | AN000       |       |
-| AV2    | P001    | AN001       |       |
-| AV3    | P002    | AN002       |       |
-| AV4    | P003    | AN003       |       |
-| AV5    | P004    | AN004       |       |
-| AV6    | P011    | AN006       |       |
-| AV7    | P014    | AN009       | DAC capable |
-| AV8    | P015    | AN010       |       |
+| AV1    | P004    | AN004       | External pull-up switchable |
+| AV2    | P011    | AN006       | External pull-up switchable |
+| AV3    | P014    | AN009       | External pull-up switchable |
+| AV4    | P015    | AN010       | External pull-up switchable |
+| AV5    | P003    | AN003       |       |
+| AV6    | P002    | AN002       |       |
+| AV7    | P001    | AN001       |       |
+| AV8    | P000    | AN000       |       |
 
-## Digital Inputs (8) — GPT0-3 Input Capture
+## Digital Inputs (4) — GPT0-2 Input Capture
 
-Each GPT timer captures two inputs (A + B channels).  
-All 32-bit counters on GPT0-1; 16-bit on GPT2-3.
+Only DI1-DI4 are populated on DTM2.
 
-| Signal | MCU Pin | GPT  | Channel | Timer Group |
-|--------|---------|------|---------|-------------|
-| DI1    | P501    | GPT2 | B       | GPT2: DI1+DI6 |
-| DI2    | P104    | GPT1 | B       | GPT1: DI2+DI3 |
-| DI3    | P105    | GPT1 | A       | GPT1: DI2+DI3 |
-| DI4    | P106    | GPT0 | B       | GPT0: DI4+DI5 |
-| DI5    | P107    | GPT0 | A       | GPT0: DI4+DI5 |
-| DI6    | P113    | GPT2 | A       | GPT2: DI1+DI6 |
-| DI7    | P112    | GPT3 | B       | GPT3: DI7+DI8 |
-| DI8    | P111    | GPT3 | A       | GPT3: DI7+DI8 |
+| Signal | MCU Pin | GPT | Channel | Notes |
+|--------|---------|-----|---------|-------|
+| DI1    | P501    | GPT2 | B | Input capture |
+| DI2    | P104    | GPT1 | B | Input capture |
+| DI3    | P105    | GPT1 | A | Input capture |
+| DI4    | P106    | GPT0 | B | Input capture |
 
-## Digital Outputs (8) — GPT4-7 Hardware PWM
+## PWM Outputs (4) — GPT4-7 Hardware PWM
 
-Each GPT timer drives two outputs (A + B channels).  
-Outputs in the same pair share frequency but have independent duty cycles.  
-All 16-bit timers (GPT4-7), clocked at PCLKD = 24 MHz.
+Each output has its own GPT frequency on DTM2.
 
-| Signal | MCU Pin | GPT  | Channel | Freq Group |
-|--------|---------|------|---------|------------|
-| DPO1   | P408    | GPT5 | B       | Freq A     |
-| DPO2   | P409    | GPT5 | A       | Freq A     |
-| DPO3   | P410    | GPT6 | B       | Freq B     |
-| DPO4   | P411    | GPT6 | A       | Freq B     |
-| DPO5   | P304    | GPT7 | A       | Freq C     |
-| DPO6   | P303    | GPT7 | B       | Freq C     |
-| DPO7   | P302    | GPT4 | A       | Freq D     |
-| DPO8   | P301    | GPT4 | B       | Freq D     |
+| Signal | MCU Pin | GPT | Channel | Notes |
+|--------|---------|-----|---------|-------|
+| OUT1   | P410    | GPT6 | B | Hardware PWM |
+| OUT2   | P408    | GPT5 | B | Hardware PWM |
+| OUT3   | P302    | GPT4 | A | Hardware PWM |
+| OUT4   | P304    | GPT7 | A | Hardware PWM |
 
-### Output PWM Specs (GPT4-7, 16-bit, PCLKD = 24 MHz)
+### Output PWM Specs
 
-GPT has built-in prescalers (/1, /2, /4, /8, /16, /32, /64, /256, /1024).  
-Firmware auto-selects the smallest divider that keeps period ≤ 65,535.
+GPT uses the same 16-bit timers and prescaler scheme as PT-IO-Mini2.  
+Firmware auto-selects the smallest divider that keeps period within 65,535 counts.
 
 | Output Freq | Prescaler | Eff. Clock | Period (counts) | Duty Resolution |
 |-------------|-----------|-----------|-----------------|-----------------|
@@ -91,55 +83,78 @@ Firmware auto-selects the smallest divider that keeps period ≤ 65,535.
 | 20 kHz      | /1        | 24 MHz    | 1,200           | 0.08%           |
 
 Min frequency (divider /1024): 24 MHz / 1024 / 65536 ≈ **0.36 Hz**  
-Max frequency: limited by useful duty resolution (≥2 counts → 12 MHz)
+Max frequency: limited by useful duty resolution (≥2 counts).
 
-> At 5 kHz with 1% duty resolution: need ≥100 counts → 4,800 counts available. ✔
+## Auxiliary Switch Outputs
+
+These are plain GPIO outputs, stored in EEPROM so they persist across reboot.
+
+| Function | MCU Pin | CLI Control | Notes |
+|----------|---------|-------------|-------|
+| Analog Pull-up Switch 1 | P205 | `AIPULLUP 1 0|1` | Adds external pull-up to AV1 |
+| Analog Pull-up Switch 2 | P204 | `AIPULLUP 2 0|1` | Adds external pull-up to AV2 |
+| Analog Pull-up Switch 3 | P303 | `AIPULLUP 3 0|1` | Adds external pull-up to AV3 |
+| Analog Pull-up Switch 4 | P301 | `AIPULLUP 4 0|1` | Adds external pull-up to AV4 |
+| CAN Termination Switch | P409 | `CANTERM 0|1` | Enables CAN terminating resistor |
+
+## ADS1115 Output Voltage Sense
+
+Added device: ADS1115IDGS on I2C address `0x90` write / `0x48` 7-bit.
+
+| ADS Channel | Measured Signal | Front End |
+|-------------|-----------------|-----------|
+| AIN0        | OUT4 Voltage    | 100k / 20k divider |
+| AIN1        | OUT3 Voltage    | 100k / 20k divider |
+| AIN2        | OUT2 Voltage    | 100k / 20k divider |
+| AIN3        | OUT1 Voltage    | 100k / 20k divider |
+
+CLI exposure: `OUTVOLT` and `STATUS`.
 
 ## Peripherals
 
-| Function   | Pin(s)     | Notes |
-|------------|------------|-------|
-| CAN TX     | P103       | CAN0 (PSEL=0x09) |
-| CAN RX     | P102       | CAN0 (PSEL=0x09) |
-| NeoPixel   | P400       | GPIO bit-bang |
-| USB CDC    | Dedicated  | USB FS device pins |
-| SWD SWDIO  | P108       | Debug — freed from DPO8 |
-| SWD SWCLK  | P300       | Debug — freed from DPO7 |
+| Function | Pin(s) | Notes |
+|----------|--------|-------|
+| CAN TX   | P103   | CAN0 |
+| CAN RX   | P102   | CAN0 |
+| NeoPixel | P112   | GPIO bit-bang output |
+| I2C SDA  | P101   | ADS1115 connection |
+| I2C SCL  | P100   | ADS1115 connection |
+| USB CDC  | Dedicated | USB FS device pins |
+| LED      | P111   | Built-in LED |
 
 ## Clocks
 
-| Clock  | Source | Frequency | Divider |
-|--------|--------|-----------|---------|
-| HOCO   | —      | 24 MHz    | —       |
-| ICLK   | HOCO   | 24 MHz    | DIV_1   |
-| PCLKB  | HOCO   | 12 MHz    | DIV_2   |
-| PCLKD  | HOCO   | 24 MHz    | DIV_1   |
+| Clock | Source | Frequency | Divider |
+|-------|--------|-----------|---------|
+| HOCO  | —      | 24 MHz    | —       |
+| ICLK  | HOCO   | 24 MHz    | DIV_1   |
+| PCLKB | HOCO   | 12 MHz    | DIV_2   |
+| PCLKD | HOCO   | 24 MHz    | DIV_1   |
 
 ## GPT Timer Allocation Summary
 
-| GPT | Width  | Function        | Pin A | Pin B |
-|-----|--------|-----------------|-------|-------|
-| 0   | 32-bit | DI capture 4+5  | P107  | P106  |
-| 1   | 32-bit | DI capture 2+3  | P105  | P104  |
-| 2   | 16-bit | DI capture 6+1  | P113  | P501  |
-| 3   | 16-bit | DI capture 8+7  | P111  | P112  |
-| 4   | 16-bit | PWM out 7+8     | P302  | P301  |
-| 5   | 16-bit | PWM out 2+1     | P409  | P408  |
-| 6   | 16-bit | PWM out 4+3     | P411  | P410  |
-| 7   | 16-bit | PWM out 5+6     | P304  | P303  |
+| GPT | Width | DTM2 Use | Pin A | Pin B |
+|-----|-------|----------|-------|-------|
+| 0   | 32-bit | DI4 capture | P107 unused | P106 |
+| 1   | 32-bit | DI3 / DI2 capture | P105 | P104 |
+| 2   | 16-bit | DI1 capture | P205 unused | P501 |
+| 3   | 16-bit | Unused | P111 | P112 |
+| 4   | 16-bit | OUT3 PWM | P302 | P301 pull-up switch 4 |
+| 5   | 16-bit | OUT2 PWM | P101 SDA alt | P408 |
+| 6   | 16-bit | OUT1 PWM | P112 NeoPixel alt | P410 |
+| 7   | 16-bit | OUT4 PWM | P304 | P303 pull-up switch 3 |
 
-## Spare Pins (available on 48-pin LQFP)
+## Spare / Unused Board Pins
 
-| MCU Pin | Capabilities | Notes |
-|---------|-------------|-------|
-| P100    | GPT5B alt, AN022, I2C SCL | |
-| P101    | GPT5A alt, AN021, I2C SDA | |
-| P110    | GPT1B alt, SPI MISO | |
-| P400    | GPT6A alt, I2C SCL0 | |
-| P500    | GPT2A alt, AN016 | |
-| P502    | GPT3B alt, AN018 | |
-| P010    | AN005 | |
-| P012    | AN007 | TX LED on UNO R4 |
-| P013    | AN008 | RX LED on UNO R4 |
-| P212    | EXTAL | Crystal osc (if used) |
-| P213    | XTAL  | Crystal osc (if used) |
+| MCU Pin | Notes |
+|---------|-------|
+| P107    | Routed to D7, not used by firmware |
+| P109    | Routed to D11, not used by firmware |
+| P110    | Routed to D12, not used by firmware |
+| P500    | Spare MCU pin |
+| P502    | Spare MCU pin |
+| P010    | Spare analog-capable MCU pin |
+| P012    | Uno R4 TX LED pad |
+| P013    | Uno R4 RX LED pad |
+| P212    | EXTAL, if crystal used |
+| P213    | XTAL, if crystal used |

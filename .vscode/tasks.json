@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build & Upload",
+			"type": "shell",
+			"command": "C:\\Users\\Peter\\.platformio\\penv\\Scripts\\platformio.exe run --target upload",
+			"group": "build"
+		}
+	]
+}

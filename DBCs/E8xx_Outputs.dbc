@@ -1,0 +1,271 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_:
+
+
+BO_ 255 E888_0x0FF: 8 Vector__XXX
+ SG_ PWM_8_Frequency m3 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_8_Duty m3 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_7_Frequency m3 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_7_Duty m3 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_6_Frequency m2 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_6_Duty m2 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_5_Frequency m2 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_5_Duty m2 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_4_Frequency m1 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_4_Duty m1 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_3_Frequency m1 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_3_Duty m1 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_2_Frequency m0 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_2_Duty m0 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_1_Frequency m0 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_1_Duty m0 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ ID3 M : 7|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 251 E888_0x0FB: 8 Vector__XXX
+ SG_ PWM_8_Frequency m3 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_8_Duty m3 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_7_Frequency m3 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_7_Duty m3 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_6_Frequency m2 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_6_Duty m2 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_5_Frequency m2 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_5_Duty m2 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_4_Frequency m1 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_4_Duty m1 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_3_Frequency m1 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_3_Duty m1 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_2_Frequency m0 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_2_Duty m0 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_1_Frequency m0 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_1_Duty m0 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ ID3 M : 7|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 253 E888_0x0FD: 8 Vector__XXX
+ SG_ Dig1_6_State m0 : 53|6@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ Version_Number m2 : 39|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ VBat m1 : 55|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ Output_Faults m0 : 59|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ minus_5V m1 : 3|12@0- (0.01,0) [0|0] "V" Vector__XXX
+ SG_ ID2 M : 7|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ E888_Status_Flags m2 : 23|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ CJC3 m0 : 39|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC2 m0 : 23|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC1 m0 : 3|12@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ _8vAux m1 : 23|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _5vAux m1 : 39|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _4_5v m2 : 3|12@0+ (0.01,0) [0|0] "V" Vector__XXX
+
+BO_ 249 E888_0x0F9: 8 Vector__XXX
+ SG_ Dig1_6_State m0 : 53|6@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ Version_Number m2 : 39|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ VBat m1 : 55|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ Output_Faults m0 : 59|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ minus_5V m1 : 3|12@0- (0.01,0) [0|0] "V" Vector__XXX
+ SG_ ID2 M : 7|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ E888_Status_Flags m2 : 23|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ CJC3 m0 : 39|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC2 m0 : 23|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC1 m0 : 3|12@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ _8vAux m1 : 23|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _5vAux m1 : 39|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _4_5v m2 : 3|12@0+ (0.01,0) [0|0] "V" Vector__XXX
+
+BO_ 252 E888_0x0FC: 8 Vector__XXX
+ SG_ Dig4 m4 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig3 m4 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig2 m3 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig1 m3 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ TC8 m4 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC7 m3 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC6 m2 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC5 m2 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC4 m1 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC3 m1 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC2 m0 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC1 m0 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ ID1 M : 7|3@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ AV8 m4 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV7 m3 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV6 m2 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV5 m2 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV4 m1 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV3 m1 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV2 m0 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV1 m0 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+
+BO_ 248 E888_0x0F8: 8 Vector__XXX
+ SG_ Dig4 m4 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig3 m4 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig2 m3 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig1 m3 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ TC8 m4 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC7 m3 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC6 m2 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC5 m2 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC4 m1 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC3 m1 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC2 m0 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC1 m0 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ ID1 M : 7|3@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ AV8 m4 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV7 m3 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV6 m2 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV5 m2 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV4 m1 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV3 m1 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV2 m0 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV1 m0 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+
+BO_ 247 E888_0x0F7: 8 Vector__XXX
+ SG_ PWM_8_Frequency m3 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_8_Duty m3 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_7_Frequency m3 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_7_Duty m3 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_6_Frequency m2 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_6_Duty m2 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_5_Frequency m2 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_5_Duty m2 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_4_Frequency m1 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_4_Duty m1 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_3_Frequency m1 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_3_Duty m1 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_2_Frequency m0 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_2_Duty m0 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_1_Frequency m0 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_1_Duty m0 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ ID3 M : 7|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 245 E888_0x0F5: 8 Vector__XXX
+ SG_ Dig1_6_State m0 : 53|6@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ Version_Number m2 : 39|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ VBat m1 : 55|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ Output_Faults m0 : 59|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ minus_5V m1 : 3|12@0- (0.01,0) [0|0] "V" Vector__XXX
+ SG_ ID2 M : 7|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ E888_Status_Flags m2 : 23|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ CJC3 m0 : 39|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC2 m0 : 23|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC1 m0 : 3|12@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ _8vAux m1 : 23|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _5vAux m1 : 39|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _4_5v m2 : 3|12@0+ (0.01,0) [0|0] "V" Vector__XXX
+
+BO_ 244 E888_0x0F4: 8 Vector__XXX
+ SG_ Dig4 m4 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig3 m4 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig2 m3 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig1 m3 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ TC8 m4 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC7 m3 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC6 m2 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC5 m2 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC4 m1 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC3 m1 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC2 m0 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC1 m0 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ ID1 M : 7|3@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ AV8 m4 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV7 m3 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV6 m2 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV5 m2 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV4 m1 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV3 m1 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV2 m0 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV1 m0 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+
+BO_ 243 E888_0x0F3: 8 Vector__XXX
+ SG_ PWM_8_Frequency m3 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_8_Duty m3 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_7_Frequency m3 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_7_Duty m3 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_6_Frequency m2 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_6_Duty m2 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_5_Frequency m2 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_5_Duty m2 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_4_Frequency m1 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_4_Duty m1 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_3_Frequency m1 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_3_Duty m1 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_2_Frequency m0 : 55|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_2_Duty m0 : 47|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ PWM_1_Frequency m0 : 23|16@0+ (1,0) [0|0] "Hz" Vector__XXX
+ SG_ PWM_1_Duty m0 : 15|8@0+ (0.3921568627,0) [0|99.9999999885] "%" Vector__XXX
+ SG_ ID3 M : 7|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 241 E888_0x0F1: 8 Vector__XXX
+ SG_ Dig1_6_State m0 : 53|6@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ Version_Number m2 : 39|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ VBat m1 : 55|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ Output_Faults m0 : 59|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ minus_5V m1 : 3|12@0- (0.01,0) [0|0] "V" Vector__XXX
+ SG_ ID2 M : 7|4@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ E888_Status_Flags m2 : 23|16@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ CJC3 m0 : 39|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC2 m0 : 23|16@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ CJC1 m0 : 3|12@0+ (1,-200) [0|0] "C" Vector__XXX
+ SG_ _8vAux m1 : 23|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _5vAux m1 : 39|16@0+ (0.01,0) [0|0] "V" Vector__XXX
+ SG_ _4_5v m2 : 3|12@0+ (0.01,0) [0|0] "V" Vector__XXX
+
+BO_ 240 E888_0x0F0: 8 Vector__XXX
+ SG_ Dig4 m4 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig3 m4 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig2 m3 : 55|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ Dig1 m3 : 39|16@0+ (0.1,0) [0|0] "Hz" Vector__XXX
+ SG_ TC8 m4 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC7 m3 : 23|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC6 m2 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC5 m2 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC4 m1 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC3 m1 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC2 m0 : 55|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ TC1 m0 : 39|16@0- (0.25,0) [0|0] "C" Vector__XXX
+ SG_ ID1 M : 7|3@0+ (1,0) [0|0] "" Vector__XXX
+ SG_ AV8 m4 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV7 m3 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV6 m2 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV5 m2 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV4 m1 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV3 m1 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV2 m0 : 23|16@0+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ AV1 m0 : 4|13@0+ (1,0) [0|0] "mV" Vector__XXX
+
+
+
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "BusType" "CAN";
+
