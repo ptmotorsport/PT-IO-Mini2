@@ -266,6 +266,8 @@ static uint16_t scaleAnalog14ToMv5000(uint16_t analogRaw14) {
   return static_cast<uint16_t>(mv);
 }
 
+static constexpr uint8_t PT_STANDARD_DEVICE_TYPE = 0x00;
+
 static uint8_t mapDuty1000To255(uint16_t dutyRaw1000) {
   if (dutyRaw1000 > 1000U) {
     dutyRaw1000 = 1000U;
@@ -455,6 +457,7 @@ void mode0BuildTxStateFrame(uint16_t txBaseId,
   frame.data[2] = digitalOutMask;
   frame.data[3] = safeMask;
   frame.data[4] = activeMask;
+  frame.data[6] = PT_STANDARD_DEVICE_TYPE;
   frame.data[7] = fwVersion;
 }
 
@@ -491,6 +494,19 @@ void mode0BuildTxDiPairFrame(uint32_t baseId,
   frame.data[4] = static_cast<uint8_t>(freq1 & 0xFF);
   frame.data[5] = static_cast<uint8_t>((freq1 >> 8) & 0xFF);
   frame.data[6] = duty1;
+}
+
+void mode0BuildTxOutputVoltageFrame(uint16_t txBaseId,
+                                    const uint16_t outputVoltageMv[4],
+                                    ModeTxFrame &frame) {
+  frame.id = txBaseId + 5U;
+  frame.len = 8;
+  memset(frame.data, 0, sizeof(frame.data));
+  for (uint8_t i = 0; i < 4U; i++) {
+    uint16_t voltage = outputVoltageMv[i];
+    frame.data[i * 2U] = static_cast<uint8_t>(voltage & 0xFFU);
+    frame.data[i * 2U + 1U] = static_cast<uint8_t>((voltage >> 8) & 0xFFU);
+  }
 }
 
 void mode0BuildTxStatusFrame(uint16_t txBaseId,

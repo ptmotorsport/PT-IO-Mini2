@@ -1155,8 +1155,27 @@ static void sendTxFrames() {
     }
   };
 
-  // ECU Master CANSWB only sends the 3 analog/state frames above; skip DI and status frames
-  if (config.canMode != CAN_MODE_ECUMASTER_CANSWB_V3) {
+  if (config.canMode == CAN_MODE_PT_DEFAULT1) {
+    packFreqDuty(0, config.txBaseId + 3U);
+    packFreqDuty(2, config.txBaseId + 4U);
+
+    float outputVoltages[OUTPUT_SENSE_COUNT];
+    int16_t outputSenseRaw[OUTPUT_SENSE_COUNT];
+    readOutputSenseVoltages(outputVoltages, outputSenseRaw);
+    uint16_t outputVoltageMv[OUTPUT_SENSE_COUNT];
+    for (uint8_t i = 0; i < OUTPUT_SENSE_COUNT; i++) {
+      float millivolts = outputVoltages[i] * 1000.0f;
+      if (millivolts <= 0.0f) {
+        outputVoltageMv[i] = 0U;
+      } else if (millivolts >= 80018.0f) {
+        outputVoltageMv[i] = 65535U;
+      } else {
+        outputVoltageMv[i] = static_cast<uint16_t>((millivolts * 65535.0f / 80018.0f) + 0.5f);
+      }
+    }
+    mode0BuildTxOutputVoltageFrame(config.txBaseId, outputVoltageMv, frame);
+    sendCanFrame(frame.id, frame.data, frame.len);
+  } else if (config.canMode != CAN_MODE_ECUMASTER_CANSWB_V3) {
     packFreqDuty(0, config.txBaseId + 3);
     packFreqDuty(2, config.txBaseId + 4);
     packFreqDuty(4, config.txBaseId + 5);

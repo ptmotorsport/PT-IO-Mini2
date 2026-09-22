@@ -80,6 +80,10 @@ void mode0BuildTxDiPairFrame(uint32_t baseId,
                              bool hasPeriod1,
                              ModeTxFrame &frame);
 
+                    void mode0BuildTxOutputVoltageFrame(uint16_t txBaseId,
+                               const uint16_t outputVoltageMv[4],
+                               ModeTxFrame &frame);
+
 void mode0BuildTxStatusFrame(uint16_t txBaseId,
                              const Mode0Status &status,
                              ModeTxFrame &frame);

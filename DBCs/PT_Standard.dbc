@@ -1,0 +1,137 @@
+VERSION ""
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: PT_Standard
+
+BA_DEF_ BU_  "TpNodeBaseAddress" HEX 0 65535;
+BA_DEF_ BO_  "GenMsgSendType" STRING ;
+BA_DEF_ BO_  "GenMsgCycleTime" INT 1 10000;
+BA_DEF_ BO_  "GenMsgILSupport" ENUM  "No","Yes";
+BA_DEF_ BU_  "ILUsed" ENUM  "No","Yes";
+BA_DEF_  "ProtocolType" STRING ;
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "TpNodeBaseAddress" 0;
+BA_DEF_DEF_  "GenMsgSendType" "Cyclic";
+BA_DEF_DEF_  "GenMsgCycleTime" 10;
+BA_DEF_DEF_  "GenMsgILSupport" "Yes";
+BA_DEF_DEF_  "ILUsed" "Yes";
+BA_DEF_DEF_  "ProtocolType" "PT_Standard";
+BA_DEF_DEF_  "BusType" "CAN";
+BA_ "TpNodeBaseAddress" 0x700;
+
+
+BO_ 1600 PT_Standard_RX_Outputs_0: 8 PT_Standard
+ SG_ Out1_Freq m0 : 0|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out1_Duty m0 : 16|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out1_Flags m0 : 24|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out2_Freq m0 : 32|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out2_Duty m0 : 48|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out2_Flags m0 : 56|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1601 PT_Standard_RX_Outputs_1: 8 PT_Standard
+ SG_ Out3_Freq m0 : 0|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out3_Duty m0 : 16|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out3_Flags m0 : 24|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out4_Freq m0 : 32|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out4_Duty m0 : 48|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out4_Flags m0 : 56|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1602 PT_Standard_RX_Outputs_2: 8 PT_Standard
+ SG_ Out5_Freq m0 : 0|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out5_Duty m0 : 16|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out5_Flags m0 : 24|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out6_Freq m0 : 32|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out6_Duty m0 : 48|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out6_Flags m0 : 56|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1603 PT_Standard_RX_Outputs_3: 8 PT_Standard
+ SG_ Out7_Freq m0 : 0|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out7_Duty m0 : 16|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out7_Flags m0 : 24|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out8_Freq m0 : 32|16@0+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out8_Duty m0 : 48|8@0+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out8_Flags m0 : 56|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1604 PT_Standard_RX_Pullups: 8 PT_Standard
+ SG_ InputPullupMask m0 : 0|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1792 PT_Standard_TX_Analog_0: 8 PT_Standard
+ SG_ AV1 m0 : 0|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV2 m0 : 16|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV3 m1 : 0|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV4 m1 : 16|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+
+BO_ 1793 PT_Standard_TX_Analog_1: 8 PT_Standard
+ SG_ AV5 m0 : 0|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV6 m0 : 16|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV7 m1 : 0|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+ SG_ AV8 m1 : 16|12@1+ (1,0) [0|4095] "counts" Vector__XXX
+
+BO_ 1794 PT_Standard_TX_State: 8 PT_Standard
+ SG_ DigitalInputMask m0 : 0|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ AnalogStateMask m0 : 8|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ DigitalOutputMask m0 : 16|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ SafeMask m0 : 24|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ ActiveMask m0 : 32|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ DeviceType m0 : 48|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ FirmwareVersion m0 : 56|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1795 PT_Standard_TX_DiPair_0: 8 PT_Standard
+ SG_ Out1_Freq m0 : 0|16@1+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out1_Duty m0 : 16|8@1+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out1_Flags m0 : 24|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out2_Freq m0 : 32|16@1+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out2_Duty m0 : 48|8@1+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out2_Flags m0 : 56|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1796 PT_Standard_TX_DiPair_1: 8 PT_Standard
+ SG_ Out3_Freq m0 : 0|16@1+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out3_Duty m0 : 16|8@1+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out3_Flags m0 : 24|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ Out4_Freq m0 : 32|16@1+ (1,0) [0|10000] "Hz" Vector__XXX
+ SG_ Out4_Duty m0 : 48|8@1+ (1,0) [0|255] "raw" Vector__XXX
+ SG_ Out4_Flags m0 : 56|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 1797 PT_Standard_TX_DPO_Voltage: 8 PT_Standard
+ SG_ DPO1_Voltage m0 : 0|16@1+ (1.220717326,0) [0|80018] "mV" Vector__XXX
+ SG_ DPO2_Voltage m0 : 16|16@1+ (1.220717326,0) [0|80018] "mV" Vector__XXX
+ SG_ DPO3_Voltage m0 : 32|16@1+ (1.220717326,0) [0|80018] "mV" Vector__XXX
+ SG_ DPO4_Voltage m0 : 48|16@1+ (1.220717326,0) [0|80018] "mV" Vector__XXX
+
+VAL_ 1600 Out1_Flags 0 "Normal" 1 "Safe" 2 "Active";
+VAL_ 1601 Out3_Flags 0 "Normal" 1 "Safe" 2 "Active";
+VAL_ 1602 Out5_Flags 0 "Normal" 1 "Safe" 2 "Active";
+VAL_ 1603 Out7_Flags 0 "Normal" 1 "Safe" 2 "Active";
+VAL_ 1795 Out1_Flags 0 "Normal" 1 "Safe" 2 "Active";
+VAL_ 1796 Out3_Flags 0 "Normal" 1 "Safe" 2 "Active";
