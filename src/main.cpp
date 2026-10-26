@@ -158,7 +158,7 @@ const uint16_t DEFAULT_EIC10_BASE_ID = 718;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
-const uint8_t FW_VERSION = 0x0A;
+const uint8_t FW_VERSION = 0x0B;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.

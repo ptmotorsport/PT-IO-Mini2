@@ -38,6 +38,16 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ## Version History
 
+### v0.1.1 (October 2026)
+**Emtron AV9-16 from DI1-8**
+
+- Emtron mode (Mode 8) now fills the EIC16M's previously-unsent AN Voltage
+  9-16 frames (`base+2`/`base+3`) by synthesizing them from DI1-8 state:
+  5000mV when a DI reads high, 0mV when low. Lets users wire a basic on/off
+  switch to a spare DI and read it back as an AV channel in EMtune once
+  they've run out of Mini2's 8 real analog inputs.
+- Firmware version bumped to `v0.1.1` (`FW_VERSION = 0x0B`).
+
 ### v0.1.0 (October 2026)
 **Haltech IO12 Polarity Fixes + Per-Parameter Overrides**
 
