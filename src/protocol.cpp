@@ -8,6 +8,7 @@ extern struct Config {
   uint16_t canSpeedKbps;
   uint16_t txBaseId;
   uint16_t rxBaseId;
+  uint16_t eic10BaseId;
   uint16_t txRateHz;
   uint16_t rxTimeoutMs;
   uint16_t outFreqHz[4];
@@ -16,6 +17,10 @@ extern struct Config {
   uint8_t canMode;
   uint8_t inputPullupMask;
   uint8_t reserved[2];
+  uint8_t dutyOverrideMask;
+  uint8_t freqOverrideMask;
+  uint8_t safeOverrideMask;
+  uint8_t activeOverrideMask;
   uint16_t crc;
 } config;
 
@@ -26,6 +31,7 @@ extern void applyInputPullups();
 extern bool setCanBitrate(uint16_t kbps);
 extern uint8_t getDiDebounceMs();
 extern void setDiDebounceMs(uint8_t ms);
+extern void applyOverrideDefaultsForMode(Config &cfg);
 
 // Send JSON hello message on connect
 void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
@@ -34,6 +40,7 @@ void sendJsonHello(uint8_t fwVersion, uint8_t canMode) {
   doc["type"] = "hello";
   doc["version"] = PROTOCOL_VERSION;
   doc["fw"] = fwVersion;
+  doc["board"] = "PT-IO-Mini2";
   doc["canMode"] = canMode;
   doc["canModeName"] = canModeName(canMode);
   
@@ -126,8 +133,18 @@ void sendJsonTelemetry(const DeviceState& state) {
   for (uint8_t i = 0; i < state.numDigitalOut; i++) {
     JsonObject out = outputs.createNestedObject();
     
-    // Duty as percentage
-    float dutyPct = (static_cast<float>(state.outputDuty[i]) / 255.0f) * 100.0f;
+    // Duty as percentage. Report what is actually being applied to the pin right
+    // now, not just the stored command - while Safe State is active, applyOutputs()
+    // forces non-duty-locked channels to their Safe level without touching
+    // outputDuty[], so mirror that same substitution here or telemetry would keep
+    // showing the pre-safe-state value even though the output physically changed.
+    uint8_t appliedDuty = state.outputDuty[i];
+    bool dutyIsOverridden = (state.dutyOverrideMask & (1 << i)) != 0;
+    if (state.outputsInSafeState && !dutyIsOverridden) {
+      bool safeOn = (state.safeMask & (1 << i)) != 0;
+      appliedDuty = safeOn ? 255 : 0;
+    }
+    float dutyPct = (static_cast<float>(appliedDuty) / 255.0f) * 100.0f;
     out["duty"] = serialized(String(dutyPct, 1));
     
     // Frequency (Hz)
@@ -140,6 +157,15 @@ void sendJsonTelemetry(const DeviceState& state) {
     // Active polarity (LOW=normal, HIGH=inverted)
     bool activeHigh = (state.activeMask & (1 << i)) != 0;
     out["activeHigh"] = activeHigh;
+
+    // Last CAN-decoded values (before any app-override revert) - only
+    // meaningfully differ from the applied fields above when this channel's
+    // parameter is overridden; the app can show them as "(CAN: ...)".
+    float canDutyPct = (static_cast<float>(state.canOutputDuty[i]) / 255.0f) * 100.0f;
+    out["canDuty"] = serialized(String(canDutyPct, 1));
+    out["canFreq"] = state.canOutputFreq[i];
+    out["canSafe"] = (state.canSafeMask & (1 << i)) != 0;
+    out["canActiveHigh"] = (state.canActiveMask & (1 << i)) != 0;
   }
   
   // CAN status
@@ -152,6 +178,10 @@ void sendJsonTelemetry(const DeviceState& state) {
   can["mode"] = state.canMode;
   can["lastRxMs"] = state.lastCanRxMs;
   can["rxTimeout"] = state.rxTimeoutMs;
+  can["dutyOverrideMask"] = state.dutyOverrideMask;
+  can["freqOverrideMask"] = state.freqOverrideMask;
+  can["safeOverrideMask"] = state.safeOverrideMask;
+  can["activeOverrideMask"] = state.activeOverrideMask;
   
   serializeJson(doc, Serial);
   Serial.println();
@@ -165,6 +195,7 @@ void sendJsonConfig(const DeviceState& state) {
   doc["canSpeed"] = state.canSpeedKbps;
   doc["txBaseId"] = state.txBaseId;
   doc["rxBaseId"] = state.rxBaseId;
+  doc["eic10BaseId"] = state.eic10BaseId;
   doc["txRate"] = state.txRateHz;
   doc["rxTimeout"] = state.rxTimeoutMs;
   doc["canMode"] = state.canMode;
@@ -172,6 +203,10 @@ void sendJsonConfig(const DeviceState& state) {
   doc["activeMask"] = state.activeMask;
   doc["inputPullupMask"] = state.inputPullupMask;
   doc["diDebounceMs"] = state.diDebounceMs;
+  doc["dutyOverrideMask"] = state.dutyOverrideMask;
+  doc["freqOverrideMask"] = state.freqOverrideMask;
+  doc["safeOverrideMask"] = state.safeOverrideMask;
+  doc["activeOverrideMask"] = state.activeOverrideMask;
   
   // Output frequencies (per pair)
   JsonArray outFreqs = doc.createNestedArray("outFreq");
@@ -193,8 +228,7 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
                                  uint8_t& inputPullupMask,
                                  bool& configChanged,
                                  bool& outputsChanged,
-                                 bool& pullupChanged,
-                                 uint8_t& serialOverrideMask) {
+                                 bool& pullupChanged) {
   
   StaticJsonDocument<JSON_CMD_DOC_SIZE> doc;
   DeserializationError error = deserializeJson(doc, jsonLine);
@@ -253,8 +287,8 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     }
     
     outputDuty[ch - 1] = static_cast<uint8_t>((duty * 255 + 50) / 100);
-    // Set this channel's override bit (enable serial control)
-    serialOverrideMask |= (1 << (ch - 1));
+    // Does NOT touch dutyOverrideMask - locking is a separate, explicit setOverride action.
+    configChanged = true;
     outputsChanged = true;
     
     return {true, ""};
@@ -277,6 +311,7 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     config.outFreqHz[pair] = freq;
     outputFreq[pair * 2] = freq;
     outputFreq[pair * 2 + 1] = freq;
+    // Does NOT touch freqOverrideMask - locking is a separate, explicit setOverride action.
     configChanged = true;
     outputsChanged = true;
     
@@ -295,6 +330,7 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t mask = 1 << (ch - 1);
     safeMask = (safeMask & ~mask) | (val ? mask : 0);
     config.safeMask = safeMask;
+    // Does NOT touch safeOverrideMask - locking is a separate, explicit setOverride action.
     configChanged = true;
     outputsChanged = true;
     
@@ -313,6 +349,7 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     uint8_t mask = 1 << (ch - 1);
     activeMask = (activeMask & ~mask) | (activeHigh ? mask : 0);
     config.activeMask = activeMask;
+    // Does NOT touch activeOverrideMask - locking is a separate, explicit setOverride action.
     configChanged = true;
     outputsChanged = true;
     
@@ -395,6 +432,15 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
       config.rxBaseId = id;
       changed = true;
     }
+
+    if (doc.containsKey("eic10BaseId")) {
+      uint16_t id = doc["eic10BaseId"];
+      if (id > 0x7FF) {
+        return {false, "CAN ID must be 0x000-0x7FF"};
+      }
+      config.eic10BaseId = id;
+      changed = true;
+    }
     
     if (doc.containsKey("txRate")) {
       uint16_t rate = doc["txRate"];
@@ -419,7 +465,10 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
       if (mode >= 16) {  // CAN_MODE_COUNT
         return {false, "CAN mode must be 0-15"};
       }
-      config.canMode = mode;
+      if (mode != config.canMode) {
+        config.canMode = mode;
+        applyOverrideDefaultsForMode(config);
+      }
       changed = true;
     }
     
@@ -436,28 +485,49 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     return {true, "resetDefaults"};  // Special marker
   }
   
-  // Set serial override (per-channel or all)
-  if (strcmp(cmd, "setSerialOverride") == 0) {
+  // Set per-parameter app-vs-CAN override (duty/freq/safe/active), per-channel
+  // or as a full mask. While a parameter is overridden for a channel, CAN
+  // cannot change it - see handleCanRx()'s decode-then-revert in main.cpp.
+  if (strcmp(cmd, "setOverride") == 0) {
+    const char* param = doc["param"];
+    if (param == nullptr) {
+      return {false, "Missing 'param' field"};
+    }
+
+    uint8_t *maskPtr;
+    if (strcmp(param, "duty") == 0) {
+      maskPtr = &config.dutyOverrideMask;
+    } else if (strcmp(param, "freq") == 0) {
+      maskPtr = &config.freqOverrideMask;
+    } else if (strcmp(param, "safe") == 0) {
+      maskPtr = &config.safeOverrideMask;
+    } else if (strcmp(param, "active") == 0) {
+      maskPtr = &config.activeOverrideMask;
+    } else {
+      return {false, "param must be 'duty', 'freq', 'safe', or 'active'"};
+    }
+
     if (doc.containsKey("mask")) {
-      uint8_t mask = doc["mask"] | 0;
-      serialOverrideMask = mask;
+      *maskPtr = doc["mask"] | 0;
     } else if (doc.containsKey("ch")) {
       uint8_t ch = doc["ch"] | 0;
       bool enabled = doc["enabled"] | false;
-      
+
       if (ch < 1 || ch > 8) {
         return {false, "Channel must be 1-8"};
       }
-      
+
       uint8_t bit = 1 << (ch - 1);
       if (enabled) {
-        serialOverrideMask |= bit;
+        *maskPtr |= bit;
       } else {
-        serialOverrideMask &= ~bit;
+        *maskPtr &= ~bit;
       }
     } else {
       return {false, "Requires 'mask' or 'ch'+'enabled' fields"};
     }
+
+    configChanged = true;
     return {true, ""};
   }
   

@@ -8,8 +8,8 @@ constexpr uint8_t PROTOCOL_VERSION = 1;
 
 // JSON document sizes (bytes)
 constexpr size_t JSON_CMD_DOC_SIZE = 512;
-constexpr size_t JSON_TELEMETRY_DOC_SIZE = 1024;
-constexpr size_t JSON_RESPONSE_DOC_SIZE = 256;
+constexpr size_t JSON_TELEMETRY_DOC_SIZE = 1536;
+constexpr size_t JSON_RESPONSE_DOC_SIZE = 384;
 constexpr size_t JSON_HELLO_DOC_SIZE = 384;
 
 // Telemetry format
@@ -54,6 +54,18 @@ struct DeviceState {
   uint8_t safeMask;
   uint8_t activeMask;
   uint8_t numDigitalOut;
+
+  // Last CAN-decoded values (before any app-override revert) and the 4
+  // per-channel app-vs-CAN override masks, so the UI can show "applied X
+  // (CAN says Y)" for overridden parameters.
+  const uint8_t* canOutputDuty;
+  const uint16_t* canOutputFreq;
+  uint8_t canSafeMask;
+  uint8_t canActiveMask;
+  uint8_t dutyOverrideMask;
+  uint8_t freqOverrideMask;
+  uint8_t safeOverrideMask;
+  uint8_t activeOverrideMask;
   
   // CAN status
   bool canInitOk;
@@ -68,6 +80,7 @@ struct DeviceState {
   uint16_t canSpeedKbps;
   uint16_t txBaseId;
   uint16_t rxBaseId;
+  uint16_t eic10BaseId;
   uint16_t txRateHz;
   uint16_t rxTimeoutMs;
   uint8_t inputPullupMask;
@@ -102,8 +115,7 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
                                  uint8_t& inputPullupMask,
                                  bool& configChanged,
                                  bool& outputsChanged,
-                                 bool& pullupChanged,
-                                 uint8_t& serialOverrideMask);
+                                 bool& pullupChanged);
 
 // Get config as JSON (for getConfig command)
 void sendJsonConfig(const DeviceState& state);

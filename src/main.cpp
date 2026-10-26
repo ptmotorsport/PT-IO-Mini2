@@ -151,15 +151,23 @@ const uint16_t DEFAULT_CAN_SPEED_KBPS = 1000;
 const uint16_t DEFAULT_TX_RATE_HZ = 10;
 const uint16_t DEFAULT_TX_BASE_ID = 0x700;
 const uint16_t DEFAULT_RX_BASE_ID = 0x640;
+// Emtron mode only: base ID for the "EIC10" second emulated device that
+// carries DI5-8 frequency data (EMtune picker: "73: Emtron EIC10 x1 Device",
+// CAN PID 718-721) - see TODO_EMTRON_CAN_MODE.md §3.
+const uint16_t DEFAULT_EIC10_BASE_ID = 718;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
-const uint8_t FW_VERSION = 0x08;
+const uint8_t FW_VERSION = 0x0A;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
 // Set to 0xFF to invert all outputs, or set bits per-channel as needed.
-const uint8_t OUTPUT_STAGE_INVERT_MASK = 0x00;
+// Confirmed by bench test needed on all 8 channels: the GPT timer/output
+// stage on this board drives the opposite physical state to what the
+// activeMask-adjusted duty alone would imply (newDuty=255 -> physically
+// off, newDuty=0 -> physically on), independent of Active High/Low.
+const uint8_t OUTPUT_STAGE_INVERT_MASK = 0xFF;
 
 // Digital input duty polarity.
 // Bit=1 means DI duty is reported as low-time (active LOW).
@@ -167,7 +175,7 @@ const uint8_t DI_ACTIVE_LOW_MASK = 0xFF;
 
 // Config persistence
 const uint16_t CONFIG_MAGIC = 0x5049; // "PI"
-const uint8_t CONFIG_VERSION = 2;
+const uint8_t CONFIG_VERSION = 4;
 
 struct Config {
   uint16_t magic;
@@ -175,6 +183,7 @@ struct Config {
   uint16_t canSpeedKbps;
   uint16_t txBaseId;
   uint16_t rxBaseId;
+  uint16_t eic10BaseId;
   uint16_t txRateHz;
   uint16_t rxTimeoutMs;
   uint16_t outFreqHz[4];
@@ -183,6 +192,14 @@ struct Config {
   uint8_t canMode;
   uint8_t inputPullupMask;
   uint8_t reserved[2];
+  // App-vs-CAN per-channel override toggles (bit=1: app value wins, CAN
+  // cannot change that channel's parameter). Defaults depend on canMode -
+  // see applyOverrideDefaultsForMode() - because some protocols (Emtron)
+  // supply no frequency or safe/active data at all, so the app must own it.
+  uint8_t dutyOverrideMask;
+  uint8_t freqOverrideMask;
+  uint8_t safeOverrideMask;
+  uint8_t activeOverrideMask;
   uint16_t crc;
 };
 
@@ -202,6 +219,13 @@ uint32_t adcScanFailCount = 0;
 // Output state
 uint8_t outputDuty[NUM_DIGITAL_OUT];
 uint16_t outputFreq[NUM_DIGITAL_OUT];
+// Last CAN-decoded values, captured before any app-override revert (see
+// handleCanRx) - lets telemetry show "CAN says X" alongside the applied
+// value for channels/parameters the app has overridden.
+uint8_t canOutputDuty[NUM_DIGITAL_OUT];
+uint16_t canOutputFreq[NUM_DIGITAL_OUT];
+uint8_t canSafeMask = 0x00;
+uint8_t canActiveMask = 0x00;
 uint32_t lastAppliedPwmCounts[NUM_DIGITAL_OUT] = {
   0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL,
   0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL, 0xFFFFFFFFUL
@@ -247,7 +271,6 @@ bool canInitOk = false;
 uint16_t canRxCount = 0;
 uint16_t canTxCount = 0;
 uint16_t canTxFail = 0;
-uint8_t serialOverrideMask = 0x00;  // bitmask: bit set = channel under serial/app control, not CAN
 bool rxDebug = false;         // when true, log RX duties, applyOutputs triggers and TX failures
 
 // Timers - input capture
@@ -498,12 +521,36 @@ static uint16_t computeCrc(const Config &cfg) {
   return crc;
 }
 
+// Per-mode default for the 4 app-vs-CAN override masks (see Config). Emtron's
+// Custom Tx Data Set carries duty only - no frequency or safe/active flags
+// exist in its protocol - so those three must default to app-controlled.
+// Duty stays CAN-controlled by default even for Emtron, since driving duty
+// from the ECU is the entire point of that mode.
+// Also seeds the default CAN TX rate per mode - Haltech IO12A&B (mode 3)
+// needs a faster 20Hz default since it combines two IO12 buses' worth of
+// status traffic onto one set of frames.
+void applyOverrideDefaultsForMode(Config &cfg) {
+  if (cfg.canMode == CAN_MODE_EMTRON) {
+    cfg.dutyOverrideMask = 0x00;
+    cfg.freqOverrideMask = 0xFF;
+    cfg.safeOverrideMask = 0xFF;
+    cfg.activeOverrideMask = 0xFF;
+  } else {
+    cfg.dutyOverrideMask = 0x00;
+    cfg.freqOverrideMask = 0x00;
+    cfg.safeOverrideMask = 0x00;
+    cfg.activeOverrideMask = 0x00;
+  }
+  cfg.txRateHz = (cfg.canMode == CAN_MODE_HALTECH_IO12AB) ? 20 : DEFAULT_TX_RATE_HZ;
+}
+
 void setDefaults(Config &cfg) {
   cfg.magic = CONFIG_MAGIC;
   cfg.version = CONFIG_VERSION;
   cfg.canSpeedKbps = DEFAULT_CAN_SPEED_KBPS;
   cfg.txBaseId = DEFAULT_TX_BASE_ID;
   cfg.rxBaseId = DEFAULT_RX_BASE_ID;
+  cfg.eic10BaseId = DEFAULT_EIC10_BASE_ID;
   cfg.txRateHz = DEFAULT_TX_RATE_HZ;
   cfg.rxTimeoutMs = DEFAULT_RX_TIMEOUT_MS;
   cfg.outFreqHz[0] = DEFAULT_PWM_FREQ_HZ;
@@ -516,6 +563,7 @@ void setDefaults(Config &cfg) {
   cfg.inputPullupMask = 0x00; // all DI pull-ups OFF by default
   memset(cfg.reserved, 0, sizeof(cfg.reserved));
   cfg.reserved[0] = DEFAULT_DI_DEBOUNCE_MS;
+  applyOverrideDefaultsForMode(cfg);
   cfg.crc = computeCrc(cfg);
 }
 
@@ -771,14 +819,14 @@ void applyOutputs(bool useSafeState) {
 
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
     uint8_t duty = outputDuty[i];
-    // Apply safe state only to channels NOT under serial/app override
-    bool isOverridden = (serialOverrideMask >> i) & 0x01;
+    // Apply safe state only to channels NOT under app duty override
+    bool isOverridden = (config.dutyOverrideMask >> i) & 0x01;
     if (useSafeState && !isOverridden) {
       bool safeOn = (config.safeMask >> i) & 0x01;
       duty = safeOn ? 255 : 0;
     }
     bool activeHigh = (config.activeMask >> i) & 0x01;
-    if (!activeHigh) duty = 255 - duty;
+    if (activeHigh) duty = 255 - duty;
     bool stageInverted = ((OUTPUT_STAGE_INVERT_MASK >> i) & 0x01U) != 0U;
     if (stageInverted) duty = 255 - duty;
     newDuty[i] = duty;
@@ -937,11 +985,14 @@ void applyOutputs(bool useSafeState) {
 static bool pendingConfigSave = false;
 
 static void handleCanRx(const CanMsg &msg) {
-  // Snapshot duty/freq so we can detect whether outputs actually changed
+  // Snapshot duty/freq/safe/active so we can detect whether outputs actually
+  // changed, and so overridden channels/parameters can be reverted below.
   uint8_t  prevDuty[NUM_DIGITAL_OUT];
   uint16_t prevFreq[NUM_DIGITAL_OUT];
   memcpy(prevDuty, outputDuty, sizeof(prevDuty));
   memcpy(prevFreq, outputFreq, sizeof(prevFreq));
+  uint8_t prevSafeMask = config.safeMask;
+  uint8_t prevActiveMask = config.activeMask;
 
   bool changed = false;
   bool pullupChanged = false;
@@ -949,6 +1000,7 @@ static void handleCanRx(const CanMsg &msg) {
                                  msg,
                                  config.rxBaseId,
                                  DEFAULT_PWM_FREQ_HZ,
+                                 config.outFreqHz,
                                  outputFreq,
                                  outputDuty,
                                  config.safeMask,
@@ -961,14 +1013,31 @@ static void handleCanRx(const CanMsg &msg) {
     return;
   }
 
-  // Restore any serial-overridden channels to their pre-CAN values
-  // (CAN should not control channels under serial/app override)
+  // Snapshot the raw CAN-decoded values (pre-override-revert) for telemetry,
+  // so the app can show "applied X (CAN says Y, overridden)" when they diverge.
+  memcpy(canOutputDuty, outputDuty, sizeof(canOutputDuty));
+  memcpy(canOutputFreq, outputFreq, sizeof(canOutputFreq));
+  canSafeMask = config.safeMask;
+  canActiveMask = config.activeMask;
+
+  // Revert any app-overridden channel/parameter back to its pre-CAN value -
+  // CAN should not control a parameter the user has locked to the app.
   for (int i = 0; i < NUM_DIGITAL_OUT; i++) {
-    if ((serialOverrideMask >> i) & 0x01) {
+    uint8_t bit = static_cast<uint8_t>(1U << i);
+    if ((config.dutyOverrideMask >> i) & 0x01) {
       outputDuty[i] = prevDuty[i];
+    }
+    if ((config.freqOverrideMask >> i) & 0x01) {
       outputFreq[i] = prevFreq[i];
     }
+    if ((config.safeOverrideMask >> i) & 0x01) {
+      config.safeMask = static_cast<uint8_t>((config.safeMask & ~bit) | (prevSafeMask & bit));
+    }
+    if ((config.activeOverrideMask >> i) & 0x01) {
+      config.activeMask = static_cast<uint8_t>((config.activeMask & ~bit) | (prevActiveMask & bit));
+    }
   }
+  changed = (config.safeMask != prevSafeMask) || (config.activeMask != prevActiveMask);
 
   // Defer EEPROM writes â€” never call saveConfig() from within the CAN drain
   // loop; schedule it so it runs once after the loop exits.
@@ -1157,10 +1226,23 @@ static void sendTxFrames() {
 
   // ECU Master CANSWB only sends the 3 analog/state frames above; skip DI and status frames
   if (config.canMode != CAN_MODE_ECUMASTER_CANSWB_V3) {
-    packFreqDuty(0, config.txBaseId + 3);
-    packFreqDuty(2, config.txBaseId + 4);
-    packFreqDuty(4, config.txBaseId + 5);
-    packFreqDuty(6, config.txBaseId + 6);
+    if (config.canMode == CAN_MODE_EMTRON) {
+      // DI1-4 -> EIC16M Frequency 1-4. canModeBuildTxDiPairFrame ignores the
+      // txBaseId+4 passed here and always uses the fixed EIC16M address
+      // (705/0x2C1 + 4) - see EMTRON_BASE_ID in can_modes.cpp.
+      // DI5-8 -> EIC10 "second device" Frequency frame at eic10BaseId+3
+      // (still configurable, no fixed address for that device), only
+      // emitted by canModeBuildTxDiPairFrame if DI5-8 have real data.
+      packFreqDuty(0, config.txBaseId + 3);
+      packFreqDuty(2, config.txBaseId + 4);
+      packFreqDuty(4, config.eic10BaseId + 2);
+      packFreqDuty(6, config.eic10BaseId + 3);
+    } else {
+      packFreqDuty(0, config.txBaseId + 3);
+      packFreqDuty(2, config.txBaseId + 4);
+      packFreqDuty(4, config.txBaseId + 5);
+      packFreqDuty(6, config.txBaseId + 6);
+    }
 
     Mode0Status modeStatus;
     modeStatus.canInitOk = canInitOk;
@@ -1299,6 +1381,7 @@ static void printHelp() {
   Serial.println("  CANSPEED <kbps>        - Set CAN speed (125/250/500/1000)");
   Serial.println("  TXBASE <hex>           - Set CAN TX base ID");
   Serial.println("  RXBASE <hex>           - Set CAN RX base ID");
+  Serial.println("  EIC10BASE <hex>        - Set Emtron EIC10 base ID (mode 8 only)");
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
@@ -1336,7 +1419,7 @@ static void printStatusOnce() {
   Serial.print(" ms  SafeState=");
   Serial.print(outputsInSafeState ? "YES" : "NO");
   Serial.print("  SerialOverride=0x");
-  Serial.println(serialOverrideMask, HEX);
+  Serial.println(config.dutyOverrideMask, HEX);
   Serial.print("ADC: ");
   Serial.print(ADC_RESOLUTION);
   Serial.print("-bit (0-");
@@ -1464,6 +1547,8 @@ static void printConfig() {
   Serial.println(config.txBaseId, HEX);
   Serial.print("RX Base ID: 0x");
   Serial.println(config.rxBaseId, HEX);
+  Serial.print("EIC10 Base ID: 0x");
+  Serial.println(config.eic10BaseId, HEX);
   Serial.print("TX Rate: ");
   Serial.print(config.txRateHz);
   Serial.println(" Hz");
@@ -1476,7 +1561,13 @@ static void printConfig() {
   Serial.print(canModeName(config.canMode));
   Serial.println(")");
   Serial.print("Serial Override: 0x");
-  Serial.println(serialOverrideMask, HEX);
+  Serial.println(config.dutyOverrideMask, HEX);
+  Serial.print("Freq Override: 0x");
+  Serial.println(config.freqOverrideMask, HEX);
+  Serial.print("Safe Override: 0x");
+  Serial.println(config.safeOverrideMask, HEX);
+  Serial.print("Active Override: 0x");
+  Serial.println(config.activeOverrideMask, HEX);
   Serial.print("Safe Mask: 0x");
   Serial.println(config.safeMask, HEX);
   Serial.print("Active Mask: 0x");
@@ -1537,7 +1628,7 @@ static void handleSerial() {
     JsonCmdResult result = handleJsonCommand(
       line, telemetrySub, outputDuty, outputFreq,
       config.safeMask, config.activeMask, config.inputPullupMask,
-      configChanged, outputsChanged, pullupChanged, serialOverrideMask
+      configChanged, outputsChanged, pullupChanged
     );
     
     if (!result.success) {
@@ -1553,8 +1644,10 @@ static void handleSerial() {
         adcBuf[readBuf], NUM_ANALOG,
         diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canOutputDuty, canOutputFreq, canSafeMask, canActiveMask,
+        config.dutyOverrideMask, config.freqOverrideMask, config.safeOverrideMask, config.activeOverrideMask,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
-        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.eic10BaseId, config.txRateHz, config.rxTimeoutMs,
         config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
       };
       sendJsonConfig(state);
@@ -1574,8 +1667,10 @@ static void handleSerial() {
         adcBuf[readBuf], NUM_ANALOG,
         diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canOutputDuty, canOutputFreq, canSafeMask, canActiveMask,
+        config.dutyOverrideMask, config.freqOverrideMask, config.safeOverrideMask, config.activeOverrideMask,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
-        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.eic10BaseId, config.txRateHz, config.rxTimeoutMs,
         config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, millis()
       };
       sendJsonTelemetry(state);
@@ -1688,20 +1783,20 @@ static void handleSerial() {
     String arg = getArg(1);
     arg.trim();
     if (arg == "ON") {
-      serialOverrideMask = 0xFF;  // All channels overridden
+      config.dutyOverrideMask = 0xFF;  // All channels overridden
       Serial.println("OK: Serial override ALL channels");
       return;
     }
     if (arg == "OFF") {
-      serialOverrideMask = 0x00;  // No channels overridden
+      config.dutyOverrideMask = 0x00;  // No channels overridden
       Serial.println("OK: Serial override OFF");
       return;
     }
     // Parse as hex mask
     uint8_t mask = static_cast<uint8_t>(strtol(arg.c_str(), nullptr, 0));
-    serialOverrideMask = mask;
+    config.dutyOverrideMask = mask;
     Serial.print("OK: Serial override mask=0x");
-    Serial.println(serialOverrideMask, HEX);
+    Serial.println(config.dutyOverrideMask, HEX);
     return;
   }
 
@@ -1752,6 +1847,19 @@ static void handleSerial() {
       return;
     }
     config.rxBaseId = id;
+    saveConfig();
+    Serial.println("OK");
+    return;
+  }
+
+  if (cmd.startsWith("EIC10BASE")) {
+    String arg = getArg(1);
+    uint16_t id = static_cast<uint16_t>(strtol(arg.c_str(), nullptr, 0));
+    if (id > 0x7FFU) {
+      Serial.println("ERR: CAN ID must be 0x000-0x7FF (11-bit)");
+      return;
+    }
+    config.eic10BaseId = id;
     saveConfig();
     Serial.println("OK");
     return;
@@ -1880,7 +1988,7 @@ static void handleSerial() {
     }
     outputDuty[ch - 1] = static_cast<uint8_t>((pct * 255 + 50) / 100);
     // Set this channel's override bit (enable serial control)
-    serialOverrideMask |= (1 << (ch - 1));
+    config.dutyOverrideMask |= (1 << (ch - 1));
     outputsInSafeState = false;
     lastCanRxMs = millis();
     applyOutputs(false);
@@ -2166,7 +2274,7 @@ void loop() {
   // CAN watchdog: put non-overridden channels into safe state on timeout
   // Serial-overridden channels remain under app control
   if (!outputsInSafeState && (now - lastCanRxMs > config.rxTimeoutMs)) {
-    applyOutputs(true);  // applyOutputs respects serialOverrideMask
+    applyOutputs(true);  // applyOutputs respects config.dutyOverrideMask
     outputsInSafeState = true;
   }
 
@@ -2200,8 +2308,10 @@ void loop() {
         adcBuf[readBuf], NUM_ANALOG,
         diDebouncedState, diTimerFreq, diPeriodCounts, diHighCounts, diHasPeriod, diHasHigh, NUM_DIGITAL_IN, DI_ACTIVE_LOW_MASK,
         outputDuty, outputFreq, config.safeMask, config.activeMask, NUM_DIGITAL_OUT,
+        canOutputDuty, canOutputFreq, canSafeMask, canActiveMask,
+        config.dutyOverrideMask, config.freqOverrideMask, config.safeOverrideMask, config.activeOverrideMask,
         canInitOk, outputsInSafeState, canRxCount, canTxCount, canTxFail, config.canMode, lastCanRxMs,
-        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.txRateHz, config.rxTimeoutMs,
+        config.canSpeedKbps, config.txBaseId, config.rxBaseId, config.eic10BaseId, config.txRateHz, config.rxTimeoutMs,
         config.inputPullupMask, getDiDebounceMs(), FW_VERSION, adcScanFailCount, now
       };
       sendJsonTelemetry(state);

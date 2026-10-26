@@ -38,6 +38,81 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ## Version History
 
+### v0.1.0 (October 2026)
+**Haltech IO12 Polarity Fixes + Per-Parameter Overrides**
+
+- Fixed Haltech IO12 CAN decode: Active State bit (byte1 bit5) was read
+  inverted, causing commanded-on channels to drive 0 physical duty and vice
+  versa. Confirmed against the official Haltech IO12 CAN spec and a real
+  Haltech ECU bench test.
+- Fixed `applyOutputs()` active-polarity handling: the activeHigh inversion
+  direction was backwards, and this board's GPT-timer PWM output stage has
+  its own unconditional hardware-level duty inversion (not present on the
+  original AVR+MCP2515 board) that was never being compensated for. Enabled
+  `OUTPUT_STAGE_INVERT_MASK` for all channels and corrected the inversion
+  condition so Active LOW/HIGH now behaves exactly as it did on the original
+  reference firmware. Confirmed on the bench against a real Haltech ECU
+  (duty, frequency, safe state, and active polarity all verified correct in
+  all three IO12 modes).
+- Added per-parameter (duty/frequency/safe-state/active-polarity) app-vs-CAN
+  override toggles — any output channel can now have individual parameters
+  locked to app control while others remain CAN-controlled, instead of a
+  single all-or-nothing override. Ported to Mini2's 8-channel, paired-timer
+  output layout.
+- Removed auto-lock-on-write: editing Hz/%/Safe/Active from the app no longer
+  silently sets the override/lock bit; locking now only happens via an
+  explicit setOverride command.
+- Default CAN TX rate for Haltech IO12A/IO12B (mode 3) changed to 20 Hz.
+- Telemetry now reports the actual safe-state-applied duty instead of the
+  stale pre-safe-state commanded duty.
+- Emtron mode: use the fixed EIC16M base ID (705/0x2C1) for the primary
+  device and ignore `config.txBaseId`; use the app-configured, persisted
+  output frequency (`config.outFreqHz`) for all DPOs instead of a hardcoded
+  default, respecting the paired-timer layout.
+- Added board identification field to the hello message, and build output is
+  now named after board+firmware version instead of generic `firmware.bin`.
+- Fixed `.gitignore`: concatenated entries and missing `releases/` ignore.
+- Firmware version bumped to `v0.1.0` (`FW_VERSION = 0x0A`).
+
+### v0.0.9 (October 2026)
+**Real Emtron EIC16M CAN Mode (Mode 8), with EIC10 overflow device**
+
+- Replaced the Emtron mode's prior PT-default copy/placeholder with a real
+  implementation of Emtron's EIC16M input-expander protocol
+  (https://docs.emtronaustralia.com.au/accessories/input-expander/index.html):
+  - TX: AN Voltage 1-8 (`base+0`/`base+1`, 0.001 V/count) and Frequency 1-4
+    from DI1-4 (`base+4`, 0.1 Hz/count), 8-byte little-endian frames,
+    default base ID 705/0x2C1.
+  - RX: EIC16M/EIC10 are transmit-only devices — no spec-defined RX side.
+- Mini2 has 8 digital inputs but EIC16M only defines 4 Frequency channels:
+  DI5-8 are emulated as a second Emtron device, the **EIC10** (EMtune
+  picker: "73: Emtron EIC10 x1 Device", CAN PID 718-721), using a new
+  configurable `eic10BaseId` (default 718, CLI `EIC10BASE`, JSON
+  `setCanConfig`/`getConfig` field `eic10BaseId`). Only the Frequency frame
+  (`eic10BaseId+3`) is sent, and only when DI5-8 actually have data —
+  **unconfirmed against real EIC10 hardware/EmTune captures, bench-test
+  before trusting this mapping** (see `TODO_EMTRON_CAN_MODE.md` §3).
+- Added output control via EMtune's "Custom Tx Data Set" feature, the same
+  approach already proven in the field by PT Motorsport's earlier
+  Haltech-based IO expanders
+  (https://www.ptmotorsport.com.au/emtron-can-information-for-use-with-pt-motorsport-io-expanders/):
+  - One 8-byte frame at `rxBaseId` (4x `uint16` LE duty, 0-1000 =
+    0.0-100.0%) drives DPO1-4; a second frame at `rxBaseId+1` drives DPO5-8
+    (Mini2 has 8 physical outputs).
+  - Deliberately does **not** replicate the reference firmware's legacy
+    safe/active flag-bit packing — safe state remains entirely owned by the
+    existing app-programmable `config.safeMask`/`config.activeMask` +
+    CAN-RX-timeout watchdog, left dormant while Emtron frames are arriving.
+- `CONFIG_VERSION` bumped 2 -> 3 for the new `eic10BaseId` field (existing
+  EEPROM configs reset to defaults on first boot after upgrading, same as
+  prior version bumps on this branch).
+- Full design notes and the DTM2-vs-Mini2 channel-count differences are
+  tracked in `TODO_EMTRON_CAN_MODE.md`.
+- Not yet bench-tested against real Emtron hardware — byte layout/scaling
+  follow the official datasheet and the proven reference firmware, but this
+  still needs confirmation on the bench before being considered final.
+- Firmware version bumped to `v0.0.9` (`FW_VERSION = 0x09`).
+
 ### v0.0.8 (May 2026)
 **IO16 Finalization + MOTEC E888 Mode 7**
 
