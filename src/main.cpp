@@ -1174,6 +1174,14 @@ static void sendTxFrames() {
     sendCanFrame(frame1.id, frame1.data, frame1.len);
   }
 
+  canModeBuildTxDigitalAnalogFrames(config.canMode, digitalInMask, frame, frame1);
+  if (frame.len > 0) {
+    sendCanFrame(frame.id, frame.data, frame.len);
+  }
+  if (frame1.len > 0) {
+    sendCanFrame(frame1.id, frame1.data, frame1.len);
+  }
+
   canModeBuildTxStateFrame(config.canMode,
                            config.txBaseId,
                            digitalInMask,

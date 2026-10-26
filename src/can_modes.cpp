@@ -1190,9 +1190,12 @@ static void motecE888BuildTxDiagFrame(uint8_t digitalInMask,
 // the connected ECU expects data at its own well-known IDs, not a user-configurable one.
 // Transmit-only (no RX side to decode), 8-byte LE frames:
 //   base+0: AN Voltage 1-4, base+1: AN Voltage 5-8 (0.001 V/count, 0.0-5.0 V)
+//   base+2: AN Voltage 9-12, base+3: AN Voltage 13-16 (same encoding) - Mini2
+//     has no more than 8 real analog inputs, so these are synthesized from
+//     DI1-8 instead (digital high/low read back as 5.0V/0.0V), letting users
+//     wire a basic switch to a spare DI and read it as an AV channel in
+//     EMtune when they've run out of real AVs. See emtronBuildTxDigitalAnalogFrames.
 //   base+4: Frequency 1-4  (0.1 Hz/count)
-// AN Voltage 9-16 (base+2/+3) are intentionally not sent: Mini2 has no more
-// than 8 analog inputs.
 //
 // Mini2 has 8 digital inputs but EIC16M only has 4 Frequency channels, so
 // DI5-8 are emulated as a second Emtron device, the EIC10 (EMtune picker:
@@ -1226,6 +1229,31 @@ static void emtronBuildTxAnalogFrames(uint16_t txBaseId,
     uint16_t mv = scaleAnalog14ToMv5000(analogRaw14[i + 4]);
     frame1.data[i * 2] = static_cast<uint8_t>(mv & 0xFF);
     frame1.data[i * 2 + 1] = static_cast<uint8_t>((mv >> 8) & 0xFF);
+  }
+}
+
+// AV9-16 (base+2/+3) synthesized from DI1-8: no real analog hardware behind
+// them, just 5000mV when the DI reads high, 0mV when low - enough for a user
+// to wire a basic on/off switch to a spare DI and treat it as an AV channel.
+static void emtronBuildTxDigitalAnalogFrames(uint8_t digitalInMask,
+                                             ModeTxFrame &frame2,
+                                             ModeTxFrame &frame3) {
+  frame2.id = EMTRON_BASE_ID + 2U;
+  frame2.len = 8;
+  memset(frame2.data, 0, sizeof(frame2.data));
+  for (int i = 0; i < 4; i++) {
+    uint16_t mv = ((digitalInMask >> i) & 0x01U) ? 5000U : 0U;
+    frame2.data[i * 2] = static_cast<uint8_t>(mv & 0xFF);
+    frame2.data[i * 2 + 1] = static_cast<uint8_t>((mv >> 8) & 0xFF);
+  }
+
+  frame3.id = EMTRON_BASE_ID + 3U;
+  frame3.len = 8;
+  memset(frame3.data, 0, sizeof(frame3.data));
+  for (int i = 0; i < 4; i++) {
+    uint16_t mv = ((digitalInMask >> (i + 4)) & 0x01U) ? 5000U : 0U;
+    frame3.data[i * 2] = static_cast<uint8_t>(mv & 0xFF);
+    frame3.data[i * 2 + 1] = static_cast<uint8_t>((mv >> 8) & 0xFF);
   }
 }
 
@@ -1455,6 +1483,27 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
   }
 
   modeStubBuildTxAnalogFrames(txBaseId, analogRaw14, frame0, frame1);
+}
+
+// Second pair of analog frames, currently only populated for Emtron (DI1-8
+// synthesized as AV9-16 - see emtronBuildTxDigitalAnalogFrames). All other
+// modes send nothing here (zero-length frames, same convention as the other
+// Tx builders above when a mode has no use for a given frame slot).
+void canModeBuildTxDigitalAnalogFrames(uint8_t mode,
+                                       uint8_t digitalInMask,
+                                       ModeTxFrame &frame2,
+                                       ModeTxFrame &frame3) {
+  if (mode == CAN_MODE_EMTRON) {
+    emtronBuildTxDigitalAnalogFrames(digitalInMask, frame2, frame3);
+    return;
+  }
+
+  frame2.id = 0;
+  frame2.len = 0;
+  memset(frame2.data, 0, sizeof(frame2.data));
+  frame3.id = 0;
+  frame3.len = 0;
+  memset(frame3.data, 0, sizeof(frame3.data));
 }
 
 void canModeBuildTxStateFrame(uint8_t mode,
