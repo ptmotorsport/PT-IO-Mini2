@@ -158,7 +158,7 @@ const uint16_t DEFAULT_EIC10_BASE_ID = 718;
 const uint16_t DEFAULT_RX_TIMEOUT_MS = 2000;
 const uint16_t DEFAULT_PWM_FREQ_HZ = 300;
 const uint8_t DEFAULT_DI_DEBOUNCE_MS = 20;
-const uint8_t FW_VERSION = 0x0A;
+const uint8_t FW_VERSION = 0x0B;
 
 // Additional hardware polarity stage (e.g. external MOSFET inverter).
 // Bit=1 means invert the post-activeMask duty before writing to the pin.
@@ -1167,6 +1167,14 @@ static void sendTxFrames() {
   ModeTxFrame frame1;
 
   canModeBuildTxAnalogFrames(config.canMode, config.txBaseId, analogRaw, frame, frame1);
+  if (frame.len > 0) {
+    sendCanFrame(frame.id, frame.data, frame.len);
+  }
+  if (frame1.len > 0) {
+    sendCanFrame(frame1.id, frame1.data, frame1.len);
+  }
+
+  canModeBuildTxDigitalAnalogFrames(config.canMode, digitalInMask, frame, frame1);
   if (frame.len > 0) {
     sendCanFrame(frame.id, frame.data, frame.len);
   }

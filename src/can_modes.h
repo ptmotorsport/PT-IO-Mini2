@@ -105,6 +105,11 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
                                 ModeTxFrame &frame0,
                                 ModeTxFrame &frame1);
 
+void canModeBuildTxDigitalAnalogFrames(uint8_t mode,
+                                       uint8_t digitalInMask,
+                                       ModeTxFrame &frame2,
+                                       ModeTxFrame &frame3);
+
 void canModeBuildTxStateFrame(uint8_t mode,
                               uint16_t txBaseId,
                               uint8_t digitalInMask,
