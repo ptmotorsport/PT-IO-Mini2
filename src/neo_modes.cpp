@@ -1,4 +1,5 @@
 #include "neo_modes.h"
+#include "gear_logic.h"
 
 namespace {
 
@@ -22,27 +23,7 @@ static uint32_t neoColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static char decodeHaltechGearByte(uint8_t gearByte) {
-  switch (gearByte) {
-    case 0: return 'N';
-    case 1: return '1';
-    case 2: return '2';
-    case 3: return '3';
-    case 4: return '4';
-    case 5: return '5';
-    case 6: return '6';
-    case 7: return '7';
-    case 8: return '8';
-    case 9: return '9';
-    case 248: return 'O';
-    case 249: return 'L';
-    case 250: return 'M';
-    case 251: return 'S';
-    case 252: return 'D';
-    case 253: return 'U';
-    case 254: return 'P';
-    case 255: return 'R';
-    default: return 'U';
-  }
+  return gearCharForByte(gearByte);
 }
 
 static size_t neoMatrixIndex(uint8_t row, uint8_t col, uint8_t auxStartIndex) {

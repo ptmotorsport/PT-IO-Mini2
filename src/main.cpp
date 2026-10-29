@@ -7,6 +7,7 @@
 #include "FspTimer.h"
 #include "can_modes.h"
 #include "neo_modes.h"
+#include "gear_outputs.h"
 #include "protocol.h"
 
 // NeoPixel Configuration (raw BSP pin, not Arduino pin index)
@@ -220,6 +221,7 @@ struct Config {
 };
 
 Config config;
+static_assert(sizeof(Config) <= GEAR_OUTPUT_EEPROM_ADDRESS, "Gear bindings overlap device configuration");
 
 // ADC driver
 adc_instance_ctrl_t adc_ctrl;
@@ -578,7 +580,7 @@ static uint16_t computeCrc(const Config &cfg) {
 // needs a faster 20Hz default since it combines two IO12 buses' worth of
 // status traffic onto one set of frames.
 void applyOverrideDefaultsForMode(Config &cfg) {
-  if (cfg.canMode == CAN_MODE_EMTRON) {
+  if (cfg.canMode == CAN_MODE_EMTRON || cfg.canMode == CAN_MODE_GEAR_OUTPUTS) {
     cfg.dutyOverrideMask = 0x00;
     cfg.freqOverrideMask = 0xFF;
     cfg.safeOverrideMask = 0xFF;
@@ -1458,6 +1460,8 @@ static void printHelp() {
   Serial.println("  TXRATE <hz>            - Set CAN TX rate in Hz");
   Serial.println("  RXTIMEOUT <ms>         - Set RX timeout in ms");
   Serial.println("  CANMODE <0-15>          - Set CAN mode");
+  Serial.println("  CANMODE 9              - Gear indicator outputs (Haltech 0x470 byte 7)");
+  Serial.println("  GEARBIND <1-8> <gears>  - Bind output to 1-9,N,R,P,D,O,L,M,S,U; join with |; NONE disables");
   Serial.println("  NEOAUX NONE|SHIFT|GEAR|TEST - NeoPixel aux function after mode LED");
   Serial.println("  NEOTESTPIX <0-25>      - Number of extra LEDs after mode LED in TEST mode");
   Serial.println("  NEOTESTHSL <H> <S> <L> - TEST color H:0-359 S:0-100 L:0-100");
@@ -1644,6 +1648,12 @@ static void printConfig() {
   Serial.println(config.safeOverrideMask, HEX);
   Serial.print("Active Override: 0x");
   Serial.println(config.activeOverrideMask, HEX);
+  for (uint8_t outputIndex = 0; outputIndex < NUM_DIGITAL_OUT; outputIndex++) {
+    Serial.print("Gear Output ");
+    Serial.print(outputIndex + 1);
+    Serial.print(": ");
+    Serial.println(gearOutputsBindingText(outputIndex));
+  }
   Serial.print("Neo Aux: ");
   Serial.print(getNeoAuxMode());
   Serial.print(" (");
@@ -1768,6 +1778,7 @@ static void handleSerial() {
     
     if (result.errorMsg == "resetDefaults") {
       setDefaults(config);
+      gearOutputsResetBindings();
       saveConfig();
       for (int p = 0; p < 4; p++) {
         outputFreq[p * 2]     = config.outFreqHz[p];
@@ -1807,6 +1818,7 @@ static void handleSerial() {
   }
   if (cmd == "DEFAULTS") {
     setDefaults(config);
+    gearOutputsResetBindings();
     saveConfig();
     // Reload output frequencies from fresh defaults
     for (int p = 0; p < 4; p++) {
@@ -1984,9 +1996,27 @@ static void handleSerial() {
       Serial.println("ERR: CANMODE <0-15>");
       return;
     }
-    config.canMode = mode;
+    if (config.canMode != mode) {
+      config.canMode = mode;
+      applyOverrideDefaultsForMode(config);
+    }
     saveConfig();
     Serial.println("OK");
+    return;
+  }
+
+  if (cmd.startsWith("GEARBIND")) {
+    String channelText = getArg(1);
+    String bindingText = getArg(2);
+    uint32_t binding = 0;
+    if (channelText.length() != 1 || channelText[0] < '1' || channelText[0] > '8' ||
+        getArg(3).length() != 0 || !parseGearBinding(bindingText.c_str(), binding)) {
+      Serial.println("ERR: GEARBIND <1-8> <1-9|N|R|P|D|O|L|M|S|U or NONE>");
+      return;
+    }
+    gearOutputsSetBinding(static_cast<uint8_t>(channelText[0] - '1'), binding);
+    gearOutputsSave();
+    Serial.println("OK: Gear binding saved");
     return;
   }
 
@@ -2294,6 +2324,7 @@ void setup() {
   analogReadResolution(ADC_RESOLUTION);
 
   loadConfig();
+  gearOutputsLoad();
   neoModesInit();
 
   initAdc();
@@ -2395,6 +2426,19 @@ void loop() {
   adcService();
 
   handleSerial();
+  static uint8_t previousCanMode = 0xFF;
+  if (config.canMode != previousCanMode) {
+    if (config.canMode == CAN_MODE_GEAR_OUTPUTS || previousCanMode == CAN_MODE_GEAR_OUTPUTS) {
+      gearOutputsResetSignal();
+      for (uint8_t outputIndex = 0; outputIndex < NUM_DIGITAL_OUT; outputIndex++) {
+        if ((config.dutyOverrideMask & (1U << outputIndex)) == 0) outputDuty[outputIndex] = 0;
+        canOutputDuty[outputIndex] = 0;
+      }
+      outputsInSafeState = true;
+      applyOutputs(true);
+    }
+    previousCanMode = config.canMode;
+  }
   processCan();
   // Refresh now after processCan() so that time-delta checks below (safe-state
   // timeout, TX rate, LED, monitor) are never older than lastCanRxMs.  If the
@@ -2425,7 +2469,10 @@ void loop() {
 
   // CAN watchdog: put non-overridden channels into safe state on timeout
   // Serial-overridden channels remain under app control
-  if (!outputsInSafeState && (now - lastCanRxMs > config.rxTimeoutMs)) {
+  bool outputSignalTimedOut = config.canMode == CAN_MODE_GEAR_OUTPUTS
+      ? !gearOutputsSignalFresh(now, config.rxTimeoutMs)
+      : (now - lastCanRxMs > config.rxTimeoutMs);
+  if (!outputsInSafeState && outputSignalTimedOut) {
     applyOutputs(true);  // applyOutputs respects config.dutyOverrideMask
     outputsInSafeState = true;
   }

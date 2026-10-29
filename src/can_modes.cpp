@@ -1,4 +1,5 @@
 #include "can_modes.h"
+#include "gear_outputs.h"
 
 static const char *CAN_MODE_NAMES[CAN_MODE_COUNT] = {
   "PT_Default1",
@@ -10,7 +11,7 @@ static const char *CAN_MODE_NAMES[CAN_MODE_COUNT] = {
   "ECU Master CANSWB v3",
   "Motec E888",
   "Emtron",
-  "reserved",
+  "Gear indicator outputs",
   "reserved",
   "reserved",
   "reserved",
@@ -1414,7 +1415,11 @@ bool canModeHandleRx(uint8_t mode,
       pullupChanged = false;
       return emtronHandleRx(msg, rxBaseId, configOutFreqHz, defaultPwmFreqHz, outputFreq, outputDuty);
 
-    case CAN_MODE_RESERVED_9:
+    case CAN_MODE_GEAR_OUTPUTS:
+      maskChanged = false;
+      pullupChanged = false;
+      return gearOutputsHandleRx(msg, configOutFreqHz, outputFreq, outputDuty);
+
     case CAN_MODE_RESERVED_10:
     case CAN_MODE_RESERVED_11:
     case CAN_MODE_RESERVED_12:

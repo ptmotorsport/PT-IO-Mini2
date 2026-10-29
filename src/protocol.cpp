@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "can_modes.h"
 #include "neo_modes.h"
+#include "gear_outputs.h"
 
 // External config structure (defined in main.cpp)
 extern struct Config {
@@ -193,6 +194,13 @@ void sendJsonTelemetry(const DeviceState& state) {
   neo["testHue"] = state.neoTestHue;
   neo["testSat"] = state.neoTestSat;
   neo["testLight"] = state.neoTestLight;
+
+  if (state.canMode == CAN_MODE_GEAR_OUTPUTS) {
+    JsonObject gear = doc.createNestedObject("gearOutputs");
+    char currentGear[2] = {gearOutputsCurrentGear(), '\0'};
+    gear["gear"] = String(currentGear);
+    gear["signalFresh"] = gearOutputsSignalFresh(state.nowMs, state.rxTimeoutMs);
+  }
   
   serializeJson(doc, Serial);
   Serial.println();
@@ -223,6 +231,11 @@ void sendJsonConfig(const DeviceState& state) {
   doc["freqOverrideMask"] = state.freqOverrideMask;
   doc["safeOverrideMask"] = state.safeOverrideMask;
   doc["activeOverrideMask"] = state.activeOverrideMask;
+
+  JsonArray gearBindings = doc.createNestedArray("gearBindings");
+  for (uint8_t outputIndex = 0; outputIndex < 8; outputIndex++) {
+    gearBindings.add(gearOutputsBindingText(outputIndex));
+  }
   
   // Output frequencies (per pair)
   JsonArray outFreqs = doc.createNestedArray("outFreq");
@@ -522,6 +535,22 @@ JsonCmdResult handleJsonCommand(const String& jsonLine,
     }
     
     return {true, ""};
+  }
+
+  if (strcmp(cmd, "setGearBinding") == 0) {
+    if (!doc["ch"].is<int>() || !doc["gears"].is<const char *>()) {
+      return {false, "Expected ch (1-8) and gears string"};
+    }
+    int channel = doc["ch"].as<int>();
+    String gears = doc["gears"].as<const char *>();
+    gears.toUpperCase();
+    uint32_t binding = 0;
+    if (channel < 1 || channel > 8 || !parseGearBinding(gears.c_str(), binding)) {
+      return {false, "Invalid gear binding: use 1-9|N|R|P|D|O|L|M|S|U or NONE"};
+    }
+    gearOutputsSetBinding(static_cast<uint8_t>(channel - 1), binding);
+    gearOutputsSave();
+    return {true, "Gear binding saved"};
   }
 
   if (strcmp(cmd, "setNeoAux") == 0) {

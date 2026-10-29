@@ -38,6 +38,38 @@ Rev 2 PCB will use the bare RA4M1 chip — see `PINOUT.md` for the new pinout.
 
 ## Version History
 
+### Unreleased (29 October 2026)
+**Gear Indicator Outputs - CAN Mode 9**
+
+- Added receive-only CAN mode 9 (`Gear indicator outputs`), using the same
+  Haltech gear signal as NeoPixel GEAR mode: standard CAN ID `0x470`,
+  8-byte payload, gear position in byte 7 (the eighth byte).
+- Default bindings: outputs 1-4 follow gears 1-4, output 5 follows either
+  gear 5 or D, output 6 follows N, output 7 follows R, and output 8 follows P.
+  Matching outputs receive 100% duty; unmatched outputs receive 0%.
+- Added persistent per-output bindings through CLI
+  `GEARBIND <1-8> <gears>` and JSON `setGearBinding`. Bindings accept multiple
+  gears joined with `|` (for example `5|D`), or `NONE` to disable an output.
+  Multiple outputs can share a gear; changes apply on the next gear frame.
+- Bindings are stored separately from the existing EEPROM configuration,
+  preserving current device settings. `DEFAULTS` / `resetDefaults` restores
+  the default bindings. `CONFIG` and JSON `getConfig` report the bindings;
+  mode 9 telemetry reports the last gear and gear-signal freshness.
+- Added a gear-specific watchdog: unrelated CAN traffic cannot keep a stale
+  gear indication alive. Before the first gear frame or after `rxTimeout`,
+  outputs use their configured safe states (OFF by default), respecting duty
+  overrides. Existing output polarity and frequency settings remain usable.
+- Shared Haltech gear decoding with NeoPixel GEAR mode; auxiliary NeoPixel
+  functions can continue running independently alongside mode 9.
+- Documented CLI/JSON usage and timeout behavior in `PROTOCOL.md`. Companion
+  app UI controls have not been added.
+- Validation: PlatformIO firmware build passed; host tests passed for all
+  256 gear-byte values, CAN dispatch, custom/disabled bindings, persistence,
+  corrupt-config recovery, invalid frames, timeout, and clock wraparound.
+  Bench testing completed successfully on 29 October 2026; all checks passed
+  (confirmed by the user).
+- Firmware version remains `v0.1.1` (`FW_VERSION = 0x0B`); no release bump.
+
 ### v0.1.1 (October 2026)
 **Emtron AV9-16 from DI1-8**
 

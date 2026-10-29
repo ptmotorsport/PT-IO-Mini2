@@ -14,6 +14,67 @@ The PT-IO-Mini2 device supports bidirectional communication over USB Serial (CDC
 
 ## Message Format
 
+### Gear Indicator Outputs (CAN Mode 9)
+
+CAN mode `9` (`Gear indicator outputs`) drives the eight digital outputs from
+the same Haltech gear signal as NeoPixel GEAR mode: standard CAN ID `0x470`,
+8-byte payload, gear in byte 7 (the eighth byte). This is a receive-only CAN
+mode; it does not transmit expander frames. NeoPixel auxiliary modes remain
+independent and can run alongside it.
+
+| Output | Default Gear Binding |
+| --- | --- |
+| 1 | 1 |
+| 2 | 2 |
+| 3 | 3 |
+| 4 | 4 |
+| 5 | 5 or D |
+| 6 | N |
+| 7 | R |
+| 8 | P |
+
+Matching outputs receive 100% duty; all other CAN-controlled outputs receive
+0%. Supported gear bytes are `0=N`, `1..9=1..9`, `248=O`, `249=L`, `250=M`,
+`251=S`, `252=D`, `253=U`, `254=P`, and `255=R`. Other byte values light no
+outputs. Frequency and active polarity remain user-configurable using the
+existing output controls. Duty overrides still take precedence over CAN.
+
+Enable and configure over USB serial:
+
+```text
+CANMODE 9
+GEARBIND 5 5|D
+GEARBIND 1 1|6
+GEARBIND 8 NONE
+CONFIG
+```
+
+`GEARBIND <output 1-8> <gears>` accepts one or more gear characters joined by
+`|`, or `NONE` to disable a binding. Multiple outputs may share a gear. Binding
+changes take effect on the next valid gear frame. Bindings persist across
+reboots independently of the existing device configuration; `DEFAULTS` or
+`resetDefaults` restores the table above.
+
+Equivalent JSON commands:
+
+```json
+{"cmd":"setCanConfig","canMode":9}
+{"cmd":"setGearBinding","ch":5,"gears":"5|D"}
+{"cmd":"getConfig"}
+```
+
+The config response includes `gearBindings`, an array in output order. Mode 9
+telemetry also includes `gearOutputs` with `gear` (the last gear character, or
+`?` before reception) and `signalFresh`.
+
+Gear frames must arrive within `rxTimeout` milliseconds. Unrelated CAN frames
+do not refresh that timer. Before the first gear frame, or after a timeout,
+outputs use their configured safe states (OFF by default), except channels
+with duty overrides enabled. An unmapped or invalid gear byte immediately
+commands all non-overridden outputs OFF.
+
+---
+
 All messages are **newline-terminated** strings. The device uses `\n` as the frame delimiter.
 
 ### JSON Messages
