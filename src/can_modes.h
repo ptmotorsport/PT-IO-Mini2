@@ -90,6 +90,7 @@ bool canModeHandleRx(uint8_t mode,
                      const CanMsg &msg,
                      uint16_t rxBaseId,
                      uint16_t defaultPwmFreqHz,
+                     const uint16_t configOutFreqHz[4],
                      uint16_t outputFreq[8],
                      uint8_t outputDuty[8],
                      uint8_t &safeMask,
@@ -103,6 +104,11 @@ void canModeBuildTxAnalogFrames(uint8_t mode,
                                 const uint16_t analogRaw14[8],
                                 ModeTxFrame &frame0,
                                 ModeTxFrame &frame1);
+
+void canModeBuildTxDigitalAnalogFrames(uint8_t mode,
+                                       uint8_t digitalInMask,
+                                       ModeTxFrame &frame2,
+                                       ModeTxFrame &frame3);
 
 void canModeBuildTxStateFrame(uint8_t mode,
                               uint16_t txBaseId,
